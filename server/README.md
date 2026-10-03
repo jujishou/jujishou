@@ -74,17 +74,39 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | 存活探测，供前端判断是否隐藏后台入口 |
+| GET | `/api/health` | 存活探测，供前端判断是否隐藏后台入口；返回 `boot`（本次启动的毫秒号） |
 | POST | `/api/login` | 表单 `key=<cred>`，成功则下发 `gsid` Cookie |
 | POST | `/api/logout` | 清除会话 |
 | GET | `/api/session` | 当前身份 |
 | GET | `/api/save` | 取自己的存档；首次访问自动签发 `gpid` |
 | POST | `/api/save` | 覆盖写入存档（JSON，≤128 KB） |
-| GET | `/api/admin/overview` | 后台：玩家数、字节数、总抽数、服务器时间 |
+| GET | `/api/admin/overview` | 后台：玩家数、字节数、总抽数、启动时长、端口、www / data 路径、抽得最多的玩家 |
 | GET | `/api/admin/saves` | 后台：玩家存档列表（原文档转义成 JSON 字符串） |
 | GET | `/api/admin/logs` | 后台：最近的审计日志 |
+| POST | `/api/admin/delete` | 后台：删除某个玩家的存档，表单 `pid=<id>`；id 先过 `valid_pid()`，穿越一律 400 |
+| POST | `/api/admin/restart` | 后台：硬重启整个服务端（见下） |
 
-后台三个接口都要求 `gsid` Cookie，没有就是 401 —— 前端改不了这个事实。
+后台五个接口都要求 `gsid` Cookie，没有就是 401 —— 前端改不了这个事实。
+`delete` 与 `restart` 是写操作，只接受 POST，用 GET 打它们会得到 405。
+
+## 重启是怎么实现的
+
+每个连接由 `fork()` 出来的子进程处理，监听进程是它们的父进程。`POST /api/admin/restart` 走的顺序是：
+
+1. 先把 `{"ok":true,"restarting":true}` 写出去，再 `shutdown(fd, SHUT_WR)`，让浏览器立刻拿到回执
+2. 当前子进程 `fork()` 出一个「使者」，自己继续正常收尾
+3. 使者 `setsid()` 离开原进程组，等 300 ms，然后 `killpg()` 把**整个旧进程组**连同监听进程一起 `SIGTERM` —— 挂在那儿的半截连接会一起断掉，这就是「硬」的地方
+4. 最多等 5 秒确认旧组消失，再执行 `$GACHA_HOME/start.sh`；找不到脚本就退回 `execv` 自己
+
+`GACHA_HOME` 是用 `readlink("/proc/self/exe")` 解析出来的，不用 `argv[0]` —— 服务器上是以 `./gachad` 启动的，`argv[0]` 里没有目录。
+另外 `bind()` 会重试 10 次 × 300 ms，万一旧进程还没让出端口，新进程也不会立刻自杀。
+
+**踩过的坑**：一开始直接 `execv("/proc/self/exe", ...)`，Linux 会把进程名设成路径的 basename，也就是 `exe`。
+结果 `pkill -x gachad` / `pgrep -x gachad` 再也找不到这个进程，残留实例继续占着端口，下一次重启就 `bind: Address already in use` 然后退出。
+所以必须先 `readlink` 拿到真实路径再 `execv`。
+
+前端那边：`/api/health` 会带上本次启动的毫秒级 `boot` 号，页面每 15 秒比对一次，变了就 `location.reload()`。
+再加上 `html`/`js`/`css` 一律返回 `Cache-Control: no-cache`，在线的人会在 15 秒内自动换到新版本。
 
 ## 安全措施
 
@@ -98,6 +120,8 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
 - **越权**：玩家只能读写自己 `gpid` 对应的那份存档（文件名由服务端签发，不接受客户端指定）。
 - **稳健性**：每个连接 `fork()` 一个子进程并 `alarm(25)`；请求头上限 16 KB、请求体上限 256 KB；
   写入用「临时文件 + rename + fsync」，中途断电不会留半个文件。
+  不支持 `Transfer-Encoding: chunked`，见到就直接 400；没有 `Content-Length` 的 POST 按空 body 处理。
+- **缓存**：`html` / `js` / `css` 返回 `no-cache`（保证更新后在线的人能换到新版本），图片走 `max-age=3600`。
 - **最小化二进制**：静态链接、无外部依赖，不引入任何需要联网或需要包管理器的组件。
 
 ## 已知边界
@@ -106,6 +130,9 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
   在 HTTP 下，会话 Cookie 与登录凭证都可能被链路上的人看到。想真正安全，需要域名 + 证书 + 反向代理。
 - 会话密钥与密钥记录以文件形式存在同一台机器上，拿到 root 的人可以冒充任何玩家。
 - 服务端不做业务校验之外的限流（比如抽卡频率），只保护认证入口。
+- **重启会踢人**：`POST /api/admin/restart` 会掐断所有在线连接（包括发起者自己那条）。
+  已经抽到一半没提交的存档会丢 —— 前端是节流 1.5 秒自动同步的，正常操作下不会踩到。
+  重启本身没有频率限制，因为只有拿到密钥的管理员能用。
 
 ## 文件
 

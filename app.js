@@ -32,6 +32,10 @@ const CARDS = {
     id: 'cat', name: '橘座', art: 'art/cat.jpg',
     fit: 'cover', pos: '50% 44%', note: '盯————',
   },
+  suit: {
+    id: 'suit', name: '西装客', art: 'art/suit.webp',
+    fit: 'cover', pos: '50% 44%', note: '一身黑西装，怀里抱着不该出现在这儿的东西',
+  },
 };
 
 /* ---------- 两个卡池 ---------- */
@@ -57,12 +61,13 @@ const POOLS = [
     id: 'p2',
     tab: '卡池二',
     name: '方块 · 限定',
-    desc: '本池没有 SR，SR 概率并入 R',
-    rates: { UR: 3, R: 997 },          // 千分比：0.3% / 99.7%
+    desc: '方块世界里走出来的三位',
+    rates: { UR: 3, SR: 51, R: 946 },   // 千分比：0.3% / 5.1% / 94.6%
     pityUR: PITY_UR,
     note: '大隐藏：方块白',
     entries: [
       { id: 'block', rarity: 'UR' },
+      { id: 'suit',  rarity: 'SR' },
       { id: 'cat',   rarity: 'R'  },
     ],
   },
@@ -161,12 +166,14 @@ function save() {
 
 /* 探测服务端。静态托管（比如 GitHub Pages）上没有后端，
    这时把后台入口藏掉，免得点进去只看到一堆请求失败。 */
+let serverBoot = null;
 function probeServer() {
   try {
     return fetch('api/health', { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         serverOnline = !!(d && d.ok);
+        if (d && d.boot && serverBoot === null) serverBoot = d.boot;
         const btn = $('adminBtn');
         if (btn && !serverOnline) {
           btn.hidden = true;
@@ -181,6 +188,25 @@ function probeServer() {
         return false;
       });
   } catch (e) { return Promise.resolve(false); }
+}
+
+/* 服务端每重启一次就换一个 boot 时间戳。盯着它：一旦变了，说明站长
+   在后台点了「重启网站」（多半是刚更新了页面），于是自己刷新一次，
+   在线的人不用手动刷新也能拿到新版本。 */
+function watchRestart() {
+  setInterval(function () {
+    if (!serverOnline) return;
+    try {
+      fetch('api/health', { credentials: 'same-origin', cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || !d.ok || !d.boot) return;
+          if (serverBoot === null) { serverBoot = d.boot; return; }
+          if (d.boot !== serverBoot) location.reload();
+        })
+        .catch(function () { /* 服务端正在重启，下一轮再看 */ });
+    } catch (e) { /* 忽略 */ }
+  }, 15000);
 }
 
 /* 启动时若本地无进度，则认领服务端那份（换设备也能接着抽）。
@@ -639,22 +665,78 @@ function closeAdmin() {
 }
 
 /* --- 后台界面 --- */
+/* --- 后台小工具 --- */
+function adminEsc(s) {
+  return String(s).replace(/[<>&"]/g, function (c) {
+    return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c];
+  });
+}
+
+function fmtDur(sec) {
+  sec = Math.max(0, Number(sec) || 0);
+  var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600),
+      m = Math.floor(sec % 3600 / 60), s = Math.floor(sec % 60);
+  if (d) return d + ' 天 ' + h + ' 时';
+  if (h) return h + ' 时 ' + m + ' 分';
+  if (m) return m + ' 分 ' + s + ' 秒';
+  return s + ' 秒';
+}
+
+function fmtSize(b) {
+  b = Number(b) || 0;
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  return (b / 1048576).toFixed(2) + ' MB';
+}
+
+function fmtTime(sec) {
+  var d = new Date((Number(sec) || 0) * 1000);
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+         p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+/* 后台界面状态（跨自动刷新保留） */
+var adminState = { q: '', sort: 'pulls', logFilter: 'all', players: [], logs: [] };
+
 function renderAdmin() {
   if (!isUnlocked()) { renderGate(); return; }
 
   adminTitleEl.textContent = '后台控制台';
   adminBodyEl.innerHTML =
     '<div class="sect">' +
-      '<h3>服务器状态<span id="aDot" class="dot">检测中…</span></h3>' +
-      '<div class="kv" id="adminLive"></div>' +
+      '<h3>仪表盘<span id="aDot" class="dot">检测中…</span></h3>' +
+      '<div class="dash" id="aDash"></div>' +
     '</div>' +
     '<div class="sect">' +
-      '<h3>玩家存档</h3>' +
-      '<div id="adminPlayers" class="plist"></div>' +
+      '<h3>服务器</h3>' +
+      '<div class="srv" id="aInfo"></div>' +
+      '<div class="arow" style="margin-top:12px">' +
+        '<button class="btn-sm danger" id="aRestart">重启网站</button>' +
+      '</div>' +
+      '<p class="note">重启是「硬」的：服务器会立刻掐断所有人（包括你自己）正在用的连接，' +
+      '然后整个网站重新启动，大约 1～3 秒后自动恢复。已经登录的后台不会掉线。' +
+      '别人正在玩的页面会在 15 秒内自动刷新，换到你刚更新上去的版本。' +
+      '（页面文件本来就是每次访问现读的，所以更新内容不重启也会生效；' +
+      '重启的真正意义是让「已经打开页面的人」自动换到新版本。）</p>' +
     '</div>' +
     '<div class="sect">' +
-      '<h3>审计日志</h3>' +
-      '<pre class="code code-block" id="adminLogs">读取中…</pre>' +
+      '<h3>玩家存档<span id="aPCount" class="dot"></span></h3>' +
+      '<div class="toolbar">' +
+        '<input type="search" id="aSearch" placeholder="搜索玩家 ID…" autocomplete="off">' +
+        '<button class="chip on" id="aSortBtn">按抽数排序</button>' +
+      '</div>' +
+      '<div class="plist" id="adminPlayers"></div>' +
+    '</div>' +
+    '<div class="sect">' +
+      '<h3>审计日志<span id="aLCount" class="dot"></span></h3>' +
+      '<div class="toolbar" id="aFilters">' +
+        '<button class="chip on" data-f="all">全部</button>' +
+        '<button class="chip" data-f="2">成功 2xx</button>' +
+        '<button class="chip" data-f="4">拒绝 4xx</button>' +
+        '<button class="chip" data-f="5">错误 5xx</button>' +
+      '</div>' +
+      '<div class="loglist" id="adminLogs"></div>' +
     '</div>' +
     '<div class="sect">' +
       '<h3>本机存档</h3>' +
@@ -672,12 +754,49 @@ function renderAdmin() {
       '<code class="code code-block" id="adminRaw"></code>' +
     '</div>' +
     '<div class="sect">' +
-      '<div class="arow"><button class="btn-sm danger" id="aLock">退出后台</button></div>' +
-      '<p class="note">本后台由服务器校验：密钥经 PBKDF2-SHA256（12 万轮）加盐存储，服务端只比对摘要，' +
-      '会话是 HMAC 签名的 HttpOnly Cookie。密钥明文不会存进任何文件，也不随请求上传——' +
-      '浏览器先在本机把它算成 SHA-256 摘要再发送。</p>' +
+      '<div class="arow">' +
+        '<button class="btn-sm" id="aAuto">自动刷新：开</button>' +
+        '<button class="btn-sm danger" id="aLock">退出后台</button>' +
+      '</div>' +
+      '<p class="note">这个后台由服务器校验，不是前端藏了个开关：密钥经 PBKDF2-SHA256（12 万轮）加盐后才落盘，' +
+      '会话是 HMAC 签名的 HttpOnly Cookie，改一个字节就失效。密钥明文不会存进任何文件，也不随请求上传——' +
+      '浏览器先在本机把它算成 SHA-256 摘要再发送。删除玩家存档会在服务器上真的删掉，无法恢复。</p>' +
     '</div>';
 
+  /* --- 工具条事件 --- */
+  var searchEl = $('aSearch');
+  if (searchEl) {
+    searchEl.value = adminState.q;
+    searchEl.addEventListener('input', function () {
+      adminState.q = this.value.trim().toLowerCase();
+      paintPlayers();
+    });
+  }
+  var sortBtn = $('aSortBtn');
+  if (sortBtn) {
+    var labels = { pulls: '按抽数排序', bytes: '按体积排序', id: '按 ID 排序' };
+    var order = ['pulls', 'bytes', 'id'];
+    sortBtn.textContent = labels[adminState.sort];
+    sortBtn.addEventListener('click', function () {
+      adminState.sort = order[(order.indexOf(adminState.sort) + 1) % order.length];
+      sortBtn.textContent = labels[adminState.sort];
+      paintPlayers();
+    });
+  }
+  var filters = $('aFilters');
+  if (filters) {
+    filters.addEventListener('click', function (e) {
+      var b = e.target.closest('button[data-f]');
+      if (!b) return;
+      adminState.logFilter = b.getAttribute('data-f');
+      Array.prototype.forEach.call(filters.querySelectorAll('.chip'), function (c) {
+        c.classList.toggle('on', c === b);
+      });
+      paintLogs();
+    });
+  }
+
+  /* --- 本机存档 --- */
   $('aExport').addEventListener('click', exportSave);
   $('aImport').addEventListener('click', function () { $('aFile').click(); });
   $('aFile').addEventListener('change', importSave);
@@ -693,10 +812,54 @@ function renderAdmin() {
     save(); renderAll();
     adminMsg('已清空本机数据', 'good');
   });
+
+  /* --- 自动刷新开关 / 退出 --- */
+  var autoBtn = $('aAuto');
+  adminState.auto = true;
+  autoBtn.addEventListener('click', function () {
+    adminState.auto = !adminState.auto;
+    autoBtn.textContent = '自动刷新：' + (adminState.auto ? '开' : '关');
+    if (adminState.auto) startAdminTimer(); else stopAdminTimer();
+  });
   $('aLock').addEventListener('click', function () {
     api('/api/logout', { method: 'POST', body: '' }).then(function () {
       lockAdmin(); closeAdmin(); renderAll();
     });
+  });
+
+  /* --- 重启网站（硬重启：服务端会把所有连接一起掐掉再重来） --- */
+  $('aRestart').addEventListener('click', function () {
+    if (!confirm('确定重启网站吗？\n\n所有正在访问的人（包括你自己）都会被立刻断开，' +
+                 '网站会在 1～3 秒后重新启动。')) return;
+    var btn = this;
+    btn.disabled = true;
+    adminMsg('正在重启网站…', '');
+
+    function waitUp() {
+      adminMsg('连接已被断开，等待网站重新启动…', '');
+      var tries = 0;
+      var timer = setInterval(function () {
+        tries++;
+        api('/api/health').then(function (h) {
+          if (h.ok) {
+            clearInterval(timer);
+            adminMsg('网站已重新启动（约 ' + (tries * 0.8).toFixed(1) + ' 秒）', 'good');
+            btn.disabled = false;
+            refreshAdminLive();
+          }
+        }).catch(function () {
+          if (tries >= 30) {
+            clearInterval(timer);
+            adminMsg('等了 24 秒还没起来，请手动刷新页面，或去服务器看一眼 server.log', 'bad');
+            btn.disabled = false;
+          }
+        });
+      }, 800);
+    }
+
+    /* 服务端回完 200 就自杀了，所以请求本身断掉也是正常的，两种情况都去等它回来 */
+    api('/api/admin/restart', { method: 'POST', body: 'go=1' })
+      .then(waitUp, waitUp);
   });
 
   refreshAdminLive();
@@ -706,7 +869,7 @@ function renderAdmin() {
 function renderGate() {
   adminTitleEl.textContent = '后台入口';
   adminBodyEl.innerHTML =
-    '<p class="note">请输入专属密钥。校验在服务器上进行，错误尝试会被限速。</p>' +
+    '<p class="note">请输入专属密钥。校验在服务器上进行，错误尝试会被限速（10 分钟内 5 次）。</p>' +
     '<div class="field" style="margin-top:12px">' +
       '<input type="password" id="aKeyInput" placeholder="DSH-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false">' +
       '<button class="btn-sm" id="aKeyGo">进入后台</button>' +
@@ -747,19 +910,79 @@ function tryUnlock() {
     .catch(function () { adminMsg('无法连接服务器', 'bad'); });
 }
 
-function fmtTime(sec) {
-  var d = new Date(sec * 1000);
-  function p(n) { return (n < 10 ? '0' : '') + n; }
-  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' +
-         p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+/* --- 玩家列表渲染 --- */
+function paintPlayers() {
+  var box = $('adminPlayers'), cnt = $('aPCount');
+  if (!box) return;
+
+  var list = adminState.players.slice();
+  var q = adminState.q;
+  if (q) list = list.filter(function (p) { return p.id.toLowerCase().indexOf(q) >= 0; });
+
+  list.sort(function (a, b) {
+    if (adminState.sort === 'id') return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    if (adminState.sort === 'bytes') return b.bytes - a.bytes;
+    return b.pulls - a.pulls;
+  });
+
+  if (cnt) cnt.textContent = list.length + ' / ' + adminState.players.length;
+
+  if (!list.length) {
+    box.innerHTML = '<p class="empty">' +
+      (adminState.players.length ? '没有匹配的玩家。' : '还没有任何玩家存档。') + '</p>';
+    return;
+  }
+
+  box.innerHTML = list.map(function (p) {
+    return '<div class="prow" data-pid="' + adminEsc(p.id) + '">' +
+      '<span class="pid" title="' + adminEsc(p.id) + '">' + adminEsc(p.id) + '</span>' +
+      '<span class="pm">' + p.pulls + ' 抽 · <em>UR ' + p.ur + '</em> · ' + fmtSize(p.bytes) + '</span>' +
+      '<button class="mini" data-act="raw">详情</button>' +
+      '<button class="mini del" data-act="del">删除</button>' +
+      '<pre class="code code-block" hidden>' + adminEsc(p.raw) + '</pre>' +
+    '</div>';
+  }).join('');
 }
 
+/* --- 审计日志渲染 --- */
+function paintLogs() {
+  var box = $('adminLogs'), cnt = $('aLCount');
+  if (!box) return;
+
+  var all = adminState.logs, f = adminState.logFilter;
+  var list = all.filter(function (line) {
+    if (f === 'all') return true;
+    var m = line.match(/\s(\d{3})\s*$/);
+    return m && m[1].charAt(0) === f;
+  });
+
+  if (cnt) cnt.textContent = list.length + ' / ' + all.length;
+
+  if (!list.length) {
+    box.innerHTML = '<div class="empty">' + (all.length ? '没有符合条件的记录。' : '（暂无日志）') + '</div>';
+    return;
+  }
+
+  box.innerHTML = list.map(function (line) {
+    var m = line.match(/\s(\d{3})\s*$/);
+    var cls = m ? 's' + m[1].charAt(0) : '';
+    var body = adminEsc(line);
+    if (m) {
+      var code = m[1];
+      var i = body.lastIndexOf(code);
+      body = body.slice(0, i) + '<i>' + code + '</i>';
+    }
+    return '<div class="' + cls + '">' + body + '</div>';
+  }).join('');
+}
+
+/* --- 拉取服务端数据 --- */
 function refreshAdminLive() {
   if (!modalEl || modalEl.hidden || !isUnlocked()) return;
 
   api('/api/admin/overview').then(function (r) {
-    var dot = $('aDot'), live = $('adminLive');
-    if (!dot || !live) return;
+    var dot = $('aDot'), dash = $('aDash'), info = $('aInfo');
+    if (!dot || !dash) return;
     if (r.status === 401) {
       dot.className = 'dot bad'; dot.textContent = '会话已失效';
       lockAdmin(); renderGate();
@@ -767,53 +990,94 @@ function refreshAdminLive() {
       return;
     }
     if (!r.ok || !r.data || !r.data.ok) { dot.className = 'dot bad'; dot.textContent = '异常'; return; }
+    var d = r.data;
     dot.className = 'dot good'; dot.textContent = '在线';
-    live.innerHTML =
-      '<div><b>' + r.data.players + '</b><span>玩家存档</span></div>' +
-      '<div><b>' + r.data.pulls + '</b><span>记录总抽数</span></div>' +
-      '<div><b>' + (r.data.bytes / 1024).toFixed(1) + ' KB</b><span>占用空间</span></div>' +
-      '<div><b>' + r.data.port + '</b><span>服务端口</span></div>' +
-      '<div><b>' + fmtTime(r.data.serverTime) + '</b><span>服务器时间</span></div>';
+
+    dash.innerHTML =
+      '<div class="dstat"><b>' + d.players + '</b><span>玩家存档</span></div>' +
+      '<div class="dstat"><b>' + d.pulls + '</b><span>记录总抽数</span></div>' +
+      '<div class="dstat"><b>' + fmtSize(d.bytes) + '</b><span>占用空间</span></div>' +
+      '<div class="dstat"><b>' + fmtDur(d.uptimeSec) + '</b><span>服务已运行</span></div>' +
+      (d.topPid ? '<div class="dstat ur"><b>' + d.topPulls + '</b><span>最肝玩家抽数</span></div>' : '');
+
+    if (info) {
+      info.innerHTML =
+        '<div><span>端口</span><code>' + d.port + '</code></div>' +
+        '<div><span>站点目录</span><code>' + adminEsc(d.www || '—') + '</code></div>' +
+        '<div><span>数据目录</span><code>' + adminEsc(d.data || '—') + '</code></div>' +
+        '<div><span>服务器时间</span><code>' + fmtTime(d.serverTime) + '</code></div>' +
+        '<div><span>最肝玩家</span><code>' + adminEsc(d.topPid || '—') + '</code></div>';
+    }
   }).catch(function () {
     var dot = $('aDot');
     if (dot) { dot.className = 'dot bad'; dot.textContent = '离线'; }
   });
 
   api('/api/admin/saves').then(function (r) {
-    var box = $('adminPlayers');
-    if (!box || !r.data || !r.data.ok) return;
-    if (!r.data.players.length) { box.innerHTML = '<p class="note">还没有任何玩家存档。</p>'; return; }
-    box.innerHTML = r.data.players.map(function (p) {
-      var pulls = '—', ur = '—';
+    if (!r.data || !r.data.ok) return;
+    adminState.players = (r.data.players || []).map(function (p) {
+      var pulls = 0, ur = 0;
       try {
         var sv = JSON.parse(p.raw);
         pulls = sv.total || 0;
-        var n = 0;
-        if (sv.pools) Object.keys(sv.pools).forEach(function (k) { n += (sv.pools[k].got && sv.pools[k].got.UR) || 0; });
-        ur = n;
-      } catch (e) {}
-      return '<details class="pitem"><summary><b>' + p.id.slice(0, 12) + '…</b>' +
-             '<span>' + pulls + ' 抽 · 大隐藏 ×' + ur + ' · ' + p.bytes + 'B</span></summary>' +
-             '<pre class="code code-block">' + p.raw.replace(/[<>&]/g, function (c) {
-               return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c];
-             }) + '</pre></details>';
-    }).join('');
+        if (sv.pools) Object.keys(sv.pools).forEach(function (k) {
+          ur += (sv.pools[k].got && sv.pools[k].got.UR) || 0;
+        });
+      } catch (e) { /* 存档坏了也不影响列表 */ }
+      return { id: p.id, bytes: p.bytes, raw: p.raw, pulls: pulls, ur: ur };
+    });
+    paintPlayers();
   }).catch(function () {});
 
   api('/api/admin/logs').then(function (r) {
-    var box = $('adminLogs');
-    if (!box || !r.data || !r.data.ok) return;
-    box.textContent = r.data.logs.length ? r.data.logs.join('\n') : '（暂无日志）';
+    if (!r.data || !r.data.ok) return;
+    adminState.logs = (r.data.logs || []).slice().reverse();
+    paintLogs();
   }).catch(function () {});
 
   var raw = $('adminRaw');
   if (raw) raw.textContent = JSON.stringify(state, null, 2);
 }
 
+/* --- 玩家卡片上的按钮（事件委托，避免每次刷新重绑） --- */
+document.addEventListener('click', function (e) {
+  var btn = e.target.closest && e.target.closest('.prow [data-act]');
+  if (!btn) return;
+  var row = btn.closest('.prow');
+  var pid = row && row.getAttribute('data-pid');
+  if (!pid) return;
+  var act = btn.getAttribute('data-act');
+
+  if (act === 'raw') {
+    var pre = row.querySelector('pre');
+    if (pre) pre.hidden = !pre.hidden;
+    btn.textContent = pre && pre.hidden ? '详情' : '收起';
+    return;
+  }
+
+  if (act === 'del') {
+    if (!confirm('确定删除玩家 ' + pid + ' 的存档吗？\n这在服务器上是真的删除，无法恢复。')) return;
+    btn.disabled = true;
+    api('/api/admin/delete', { method: 'POST', body: 'pid=' + encodeURIComponent(pid) })
+      .then(function (r) {
+        if (r.ok && r.data && r.data.ok) {
+          adminState.players = adminState.players.filter(function (p) { return p.id !== pid; });
+          paintPlayers();
+        } else {
+          alert('删除失败：' + ((r.data && r.data.msg) || '未知错误'));
+          btn.disabled = false;
+        }
+      })
+      .catch(function () { alert('无法连接服务器'); btn.disabled = false; });
+  }
+});
+
 var adminTimer = null;
 function startAdminTimer() {
   stopAdminTimer();
-  adminTimer = setInterval(refreshAdminLive, 5000);
+  adminTimer = setInterval(function () {
+    if (adminState.auto) refreshAdminLive();
+  }, 5000);
 }
 function stopAdminTimer() {
   if (adminTimer) { clearInterval(adminTimer); adminTimer = null; }
@@ -866,3 +1130,4 @@ let serverOnline = false;
 renderAll();
 probeServer();
 syncFromServer();
+watchRestart();

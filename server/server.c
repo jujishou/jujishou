@@ -21,6 +21,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <dirent.h>
 #include <netinet/in.h>
@@ -42,6 +43,8 @@
 static const char *g_www  = "/opt/gacha/www";
 static const char *g_data = "/opt/gacha/data";
 static int         g_port = 8080;
+static char       *g_argv0 = NULL;   /* argv[0]，自我重启时用来重新执行自己 */
+static char        g_home[4096];     /* 程序所在目录，重启时用它找 start.sh */
 
 static char    g_saves_dir[512];
 static char    g_admin_file[512];
@@ -49,6 +52,11 @@ static char    g_secret_file[512];
 static char    g_log_file[512];
 static char    g_fail_file[512];
 static uint8_t g_secret[64];
+static long long g_start_time = 0;
+/* 每次进程启动都换一个毫秒级的「启动号」。前端轮询 /api/health 比对它，
+   一旦变了就说明服务端重启过，自动刷新页面去取新版本。
+   刻意不用秒级的 g_start_time：重启很快时有可能落在同一秒里，那就白等了。 */
+static long long g_boot_id = 0;
 
 /* ---------- 基础输出 ---------- */
 static void raw(int fd, const char *s) { write_all(fd, s, strlen(s)); }
@@ -143,7 +151,7 @@ static int read_request(int fd, req_t *r)
     size_t used = 0, hdr_end = 0, hdr_skip = 0;
     char  *hdr = NULL, *rest = NULL;
     size_t clen = 0;
-    int    has_clen = 0, bad = 0, rc = 0;
+    int    has_clen = 0, has_te = 0, bad = 0, rc = 0;
 
     memset(r, 0, sizeof *r);
 
@@ -220,6 +228,8 @@ static int read_request(int fd, req_t *r)
                     long v = strtol(val, NULL, 10);
                     if (v < 0 || v > BODY_MAX) bad = 1;
                     else { clen = (size_t)v; has_clen = 1; }
+                } else if (!strcasecmp(line, "Transfer-Encoding")) {
+                    has_te = 1;          /* 不支持 chunked，见到就拒 */
                 } else if (!strcasecmp(line, "Cookie")) {
                     snprintf(r->cookie, sizeof r->cookie, "%s", val);
                 }
@@ -228,7 +238,10 @@ static int read_request(int fd, req_t *r)
     }
 
     if (bad) { rc = -2; goto out; }
-    if (!strcasecmp(r->method, "POST") && !has_clen) { rc = -3; goto out; }
+    if (has_te) { rc = -3; goto out; }   /* 不支持 chunked 传输 */
+
+    /* 注意：POST 不带 Content-Length 是合法的「空 body」，
+     * 很多客户端（含 curl -X POST）就是这么发的，不能拒。 */
 
     /* body */
     if (!strcasecmp(r->method, "POST") && clen > 0) {
@@ -257,6 +270,7 @@ static int read_request(int fd, req_t *r)
     }
 
 out:
+    (void)has_clen;   /* 只用于诊断，body 长度由 clen 决定 */
     free(buf);
     if (hdr) free(hdr);
     if (rc) req_free(r);
@@ -528,8 +542,13 @@ static int serve_static(int fd, const char *rawpath)
         return 404;
     }
 
-    if (strstr(path, ".html")) cache = "Cache-Control: no-cache\r\n";
-    else cache = "Cache-Control: public, max-age=3600\r\n";
+    /* 页面与脚本每次都要回源确认，否则后台点了「重启网站」之后，
+       老用户的浏览器还会抱着缓存里的旧版本不走。图片带内容哈希含义，
+       换图会改文件名，所以给长缓存。 */
+    if (strstr(path, ".html") || strstr(path, ".js") || strstr(path, ".css"))
+        cache = "Cache-Control: no-cache\r\n";
+    else
+        cache = "Cache-Control: public, max-age=3600\r\n";
 
     send_body(fd, 200, mime_of(full), data, len, cache);
     free(data);
@@ -682,8 +701,10 @@ static void api_admin_overview(int fd)
     DIR *dir;
     struct dirent *de;
     long players = 0, total_bytes = 0, total_pulls = 0;
-    char out[1024];
+    char out[2048];
     long long now = now_sec();
+    long max_pulls = 0;
+    char newest_pid[128] = "";
 
     dir = opendir(g_saves_dir);
     if (dir) {
@@ -701,7 +722,17 @@ static void api_admin_overview(int fd)
                 char *d = read_file(file, &len);
                 if (d) {
                     char *p = strstr(d, "\"total\":");
-                    if (p) total_pulls += strtol(p + 8, NULL, 10);
+                    if (p) {
+                        long v = strtol(p + 8, NULL, 10);
+                        total_pulls += v;
+                        if (v > max_pulls) {
+                            max_pulls = v;
+                            if (nlen - 5 < sizeof newest_pid) {
+                                memcpy(newest_pid, de->d_name, nlen - 5);
+                                newest_pid[nlen - 5] = '\0';
+                            }
+                        }
+                    }
                     free(d);
                 }
             }
@@ -711,9 +742,35 @@ static void api_admin_overview(int fd)
 
     snprintf(out, sizeof out,
              "{\"ok\":true,\"players\":%ld,\"bytes\":%ld,\"pulls\":%ld,"
-             "\"serverTime\":%lld,\"port\":%d}",
-             players, total_bytes, total_pulls, now, g_port);
+             "\"serverTime\":%lld,\"port\":%d,\"uptimeSec\":%lld,"
+             "\"www\":\"%s\",\"data\":\"%s\","
+             "\"topPid\":\"%s\",\"topPulls\":%ld}",
+             players, total_bytes, total_pulls, now, g_port,
+             g_start_time ? now - g_start_time : 0,
+             g_www, g_data, newest_pid, max_pulls);
     send_json(fd, 200, out);
+}
+
+/* 删除单个玩家存档；pid 必须通过 valid_pid，杜绝路径穿越 */
+static int api_admin_delete(int fd, const req_t *r)
+{
+    char pid[128], file[700];
+
+    if (form_get(r->body, r->bodylen, "pid", pid, sizeof pid) != 0 || !pid[0]) {
+        send_json(fd, 400, "{\"ok\":false,\"err\":\"no-pid\",\"msg\":\"缺少 pid\"}");
+        return 400;
+    }
+    if (!valid_pid(pid)) {
+        send_json(fd, 400, "{\"ok\":false,\"err\":\"bad-pid\",\"msg\":\"pid 不合法\"}");
+        return 400;
+    }
+    snprintf(file, sizeof file, "%s/%s.json", g_saves_dir, pid);
+    if (unlink(file) != 0) {
+        send_json(fd, 404, "{\"ok\":false,\"err\":\"not-found\",\"msg\":\"存档不存在\"}");
+        return 404;
+    }
+    send_json(fd, 200, "{\"ok\":true,\"deleted\":true}");
+    return 200;
 }
 
 static void api_admin_logs(int fd)
@@ -759,6 +816,85 @@ static void api_admin_logs(int fd)
     free(c);
 }
 
+/* ---------- 硬重启 ----------
+ *
+ * 后台点「重启网站」时走这里。语义是「把所有人连同我自己一起端掉，重新来过」：
+ *
+ *   1. 请求子进程先把 200 响应推出去、关掉连接，客户端不会看到半截请求；
+ *   2. fork 出一个「使者」进程，它 setsid() 另立门户，脱离旧进程组；
+ *   3. 使者把整个旧进程组一次性 SIGTERM —— 监听进程和所有正在处理请求的子
+ *      进程全部断掉，也就是「全部人的连接直接掐断」；
+ *   4. 等旧组彻底消失、端口让出来，使者再拉起新的服务端：有 start.sh 就交给
+ *      它（顺带轮转日志），没有就自己 execv 重新执行。
+ *
+ * 不依赖外部守护进程，也不需要 systemd/openrc。
+ */
+static void restart_self(void)
+{
+    pid_t listener = getppid();
+    pid_t old_pg   = getpgrp();
+    pid_t d;
+
+    d = fork();
+    if (d < 0) return;      /* fork 不出来就算了，服务照常跑 */
+    if (d > 0) return;      /* 原请求子进程继续收尾 */
+
+    /* --- 以下只在使者进程里执行 --- */
+    alarm(0);               /* 取消继承来的连接超时闹钟 */
+    setsid();               /* 另立进程组，免得被下面那一刀顺手带走 */
+
+    /* 给请求子进程 0.3 秒，把响应和 access.log 收干净 */
+    usleep(300000);
+
+    /* 整组端掉：监听进程 + 所有正在处理的连接 */
+    killpg(old_pg, SIGTERM);
+    if (listener > 1) kill(listener, SIGTERM);
+
+    /* 最多等 5 秒，直到旧进程组真的消失、端口让出来 */
+    for (int i = 0; i < 50; i++) {
+        if (killpg(old_pg, 0) != 0 && errno == ESRCH) break;
+        usleep(100000);
+    }
+
+    /* 首选 start.sh：它顺带轮转日志，并按老规矩 setsid 拉起新进程 */
+    if (g_home[0]) {
+        char script[4200];
+        snprintf(script, sizeof script, "%s/start.sh", g_home);
+        if (access(script, X_OK) == 0)
+            execl("/bin/sh", "sh", script, (char *)NULL);
+    }
+
+    if (g_argv0) {
+        char *av[2];
+        char exe[4096];
+        ssize_t n;
+
+        av[0] = g_argv0;
+        av[1] = NULL;
+
+        /* 先读出 /proc/self/exe 的真实路径再 execv。
+         * 直接把 "/proc/self/exe" 交给 execv 也能起来，但内核会把进程名取成
+         * "exe"，之后 pkill -x gachad / pgrep -x gachad 就找不到它了。 */
+        n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            execv(exe, av);
+        }
+        execv(g_argv0, av);            /* 兜底：按原来启动时的路径 */
+    }
+
+    _exit(127);          /* 走到这里说明所有重启手段都失败了 */
+}
+
+static int api_admin_restart(int fd, const req_t *r)
+{
+    (void)r;
+    send_json(fd, 200, "{\"ok\":true,\"restarting\":true}");
+    shutdown(fd, SHUT_WR);   /* 立刻把响应推给客户端，不等进程收尾 */
+    restart_self();
+    return 200;
+}
+
 /* ---------- 路由 ---------- */
 static void handle(int fd, req_t *r, const char *ip)
 {
@@ -773,7 +909,8 @@ static void handle(int fd, req_t *r, const char *ip)
     /* --- 健康检查 --- */
     if (is_get && !strcmp(r->path, "/api/health")) {
         char out[128];
-        snprintf(out, sizeof out, "{\"ok\":true,\"t\":%lld}", now_sec());
+        snprintf(out, sizeof out, "{\"ok\":true,\"t\":%lld,\"boot\":%lld}",
+                 now_sec(), g_boot_id);
         access_log(ip, r->method, r->path, 200);
         send_json(fd, 200, out);
         return;
@@ -844,10 +981,26 @@ static void handle(int fd, req_t *r, const char *ip)
     /* --- 后台 --- */
     if (!strcmp(r->path, "/api/admin/overview") ||
         !strcmp(r->path, "/api/admin/saves") ||
-        !strcmp(r->path, "/api/admin/logs")) {
+        !strcmp(r->path, "/api/admin/logs") ||
+        !strcmp(r->path, "/api/admin/delete") ||
+        !strcmp(r->path, "/api/admin/restart")) {
         if (!authed) {
             access_log(ip, r->method, r->path, 401);
             send_json(fd, 401, "{\"ok\":false,\"err\":\"unauthorized\"}");
+            return;
+        }
+        /* 这两个是写操作，必须是 POST */
+        if (!strcmp(r->path, "/api/admin/delete") ||
+            !strcmp(r->path, "/api/admin/restart")) {
+            int code;
+            if (!is_post) {
+                access_log(ip, r->method, r->path, 405);
+                send_text(fd, 405, "405 Method Not Allowed");
+                return;
+            }
+            if (!strcmp(r->path, "/api/admin/delete")) code = api_admin_delete(fd, r);
+            else                                       code = api_admin_restart(fd, r);
+            access_log(ip, r->method, r->path, code);
             return;
         }
         access_log(ip, r->method, r->path, 200);
@@ -905,10 +1058,40 @@ int main(int argc, char **argv)
     struct sockaddr_in addr;
     const char *e;
 
+    g_argv0 = argv[0];   /* 自我重启时要靠它把服务端重新拉起来 */
+
+    /* 程序所在目录：重启时按这个路径去找 start.sh。
+     * argv[0] 常常是 "./gachad" 这种相对写法，靠不住，所以优先用
+     * /proc/self/exe 解析出的真实路径。 */
+    {
+        char exe[4096];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+        char *slash;
+        if (n > 0) {
+            exe[n] = '\0';
+            slash = strrchr(exe, '/');
+            if (slash) *slash = '\0';
+            snprintf(g_home, sizeof g_home, "%s", exe);
+        } else {
+            snprintf(g_home, sizeof g_home, "%s", argv[0]);
+            slash = strrchr(g_home, '/');
+            if (slash) *slash = '\0';
+            else snprintf(g_home, sizeof g_home, ".");
+        }
+    }
+
     if ((e = getenv("GACHA_PORT")) != NULL) g_port = atoi(e);
     if ((e = getenv("GACHA_WWW"))  != NULL) g_www  = e;
     if ((e = getenv("GACHA_DATA")) != NULL) g_data = e;
     if (g_port <= 0 || g_port > 65535) g_port = 8080;
+    g_start_time = now_sec();
+    {
+        struct timeval tv;
+        if (gettimeofday(&tv, NULL) == 0)
+            g_boot_id = (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+        else
+            g_boot_id = g_start_time * 1000;
+    }
 
     snprintf(g_saves_dir,  sizeof g_saves_dir,  "%s/saves",      g_data);
     snprintf(g_admin_file, sizeof g_admin_file, "%s/admin.pass", g_data);
@@ -917,7 +1100,9 @@ int main(int argc, char **argv)
     snprintf(g_fail_file,  sizeof g_fail_file,  "%s/fails.log",  g_data);
 
     if (argc > 1 && !strcmp(argv[1], "initkey")) {
-        if (argc < 3) { fprintf(stderr, "用法: gachad initkey <明文密钥>\n"); return 2; }
+        if (argc < 3) { fprintf(stderr, "用法: gachad initkey <cred>\n"
+                                        "  cred = 浏览器端算出的 SHA-256 摘要，即：\n"
+                                        "  printf '%%s' '明文密钥' | sha256sum | awk '{print $1}'\n"); return 2; }
         mkdir_p(g_data, 0750);
         if (secret_load_or_create() != 0) { fprintf(stderr, "无法生成会话密钥\n"); return 1; }
         if (admin_key_init(argv[2]) != 0) { fprintf(stderr, "无法写入密钥文件\n"); return 1; }
@@ -945,8 +1130,15 @@ int main(int argc, char **argv)
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons((uint16_t)g_port);
 
-    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
-        perror("bind"); return 1;
+    /* 重启时旧进程可能还没把端口完全让出来，重试几次再放弃 */
+    {
+        int bound = 0;
+        for (int i = 0; i < 10; i++) {
+            if (bind(listen_fd, (struct sockaddr *)&addr, sizeof addr) == 0) { bound = 1; break; }
+            if (errno != EADDRINUSE) break;
+            usleep(300000);
+        }
+        if (!bound) { perror("bind"); return 1; }
     }
     if (listen(listen_fd, 64) != 0) { perror("listen"); return 1; }
 
