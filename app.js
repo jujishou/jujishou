@@ -1031,8 +1031,12 @@ function renderAdmin() {
       '<h3>服务器</h3>' +
       '<div class="srv" id="aInfo"></div>' +
       '<div class="arow" style="margin-top:12px">' +
+        '<button class="btn-sm" id="aUltraBtn">预览出场演出</button>' +
         '<button class="btn-sm danger" id="aRestart">重启网站</button>' +
       '</div>' +
+      '<p class="note">大隐藏大约三百多抽才见一次，想看演出不用真去赌概率：' +
+      '点「预览出场演出」就会按抽到 UR 的完整流程走一遍（视频 + 卡片冲出）。' +
+      '这个按钮只影响你自己的浏览器，不会写进存档、也不会算进抽数。</p>' +
       '<p class="note">重启是「硬」的：服务器会立刻掐断所有人（包括你自己）正在用的连接，' +
       '然后整个网站重新启动，大约 1～3 秒后自动恢复。已经登录的后台不会掉线。' +
       '别人正在玩的页面会在 15 秒内自动刷新，换到你刚更新上去的版本。' +
@@ -1143,6 +1147,19 @@ function renderAdmin() {
   $('aLock').addEventListener('click', function () {
     api('/api/logout', { method: 'POST', body: '' }).then(function () {
       lockAdmin(); closeAdmin(); renderAll();
+    });
+  });
+
+  /* --- 预览出场演出：随便挑一张本池的 UR，走一遍和真抽到一模一样的流程 --- */
+  var ultraBtn = $('aUltraBtn');
+  if (ultraBtn) ultraBtn.addEventListener('click', function () {
+    var pool = currentPool();
+    var entry = (pool.entries || []).filter(function (e) { return e.rarity === 'UR'; })[0];
+    if (!entry) { adminMsg('这个卡池里没有大隐藏。', 'bad'); return; }
+    closeAdmin();
+    /* 演出时用真实卡面，不走「未获得显示 ???」那一套，否则预览看到的是一张问号 */
+    playUltra({ id: entry.id, rarity: 'UR', card: CARDS[entry.id] }, function () {
+      openAdmin();
     });
   });
 
