@@ -47,6 +47,10 @@ static const char *g_data = "/opt/gacha/data";
 static int         g_port = 8080;
 static char       *g_argv0 = NULL;   /* argv[0]，自我重启时用来重新执行自己 */
 static char        g_home[4096];     /* 程序所在目录，重启时用它找 start.sh */
+/* 前面挂了反向代理（Cloudflare）时打开：从 CF-Connecting-IP / X-Forwarded-For
+   取真实客户端 IP，用于审计日志和登录限速。默认关 —— 直连时如果信任这些头，
+   任何人都能伪造 IP 来绕过限速。 */
+static int         g_trust_proxy = 0;
 
 static char    g_saves_dir[512];
 static char    g_users_dir[512];
@@ -146,6 +150,7 @@ typedef struct {
     char   query[2048];
     char   cookie[2048];
     char   range[128];      /* Range 请求头，视频要用 */
+    char   fwd_ip[64];      /* 反代（Cloudflare）报上来的真实 IP，仅在信任时采用 */
     char  *body;
     size_t bodylen;
 } req_t;
@@ -242,6 +247,18 @@ static int read_request(int fd, req_t *r)
                     snprintf(r->cookie, sizeof r->cookie, "%s", val);
                 } else if (!strcasecmp(line, "Range")) {
                     snprintf(r->range, sizeof r->range, "%s", val);
+                } else if (!strcasecmp(line, "CF-Connecting-IP")) {
+                    /* 只有信任反代时才会真正采用，见 trust_proxy_ip() */
+                    snprintf(r->fwd_ip, sizeof r->fwd_ip, "%s", val);
+                } else if (!strcasecmp(line, "X-Forwarded-For") && !r->fwd_ip[0]) {
+                    /* 只取最左边那段（最靠近客户端的那个） */
+                    size_t k = 0;
+                    while (val[k] && val[k] != ',' && k < sizeof r->fwd_ip - 1) {
+                        r->fwd_ip[k] = val[k];
+                        k++;
+                    }
+                    r->fwd_ip[k] = '\0';
+                    while (k && (r->fwd_ip[k-1] == ' ' || r->fwd_ip[k-1] == '\t')) r->fwd_ip[--k] = '\0';
                 }
             }
         }
@@ -708,6 +725,22 @@ static void login_fail_record(const char *ip)
 }
 
 /* ---------- 审计日志 ---------- */
+
+/* 反代报上来的 IP 只信「长得像 IP」的：数字 / a-f / 点 / 冒号，2~63 字节。
+   校验一遍是必须的 —— 这些值会进日志和限速表，不能带着换行或空格进来。 */
+static int plausible_ip(const char *s)
+{
+    size_t i, n = strlen(s);
+    if (n < 2 || n >= 64) return 0;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!(isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+              || c == '.' || c == ':'))
+            return 0;
+    }
+    return 1;
+}
+
 static void access_log(const char *ip, const char *method,
                        const char *path, int code)
 {
@@ -1795,6 +1828,8 @@ int main(int argc, char **argv)
     if ((e = getenv("GACHA_PORT")) != NULL) g_port = atoi(e);
     if ((e = getenv("GACHA_WWW"))  != NULL) g_www  = e;
     if ((e = getenv("GACHA_DATA")) != NULL) g_data = e;
+    if ((e = getenv("GACHA_TRUST_PROXY")) != NULL && *e && strcmp(e, "0") != 0)
+        g_trust_proxy = 1;
     if (g_port <= 0 || g_port > 65535) g_port = 8080;
     g_start_time = now_sec();
     {
@@ -1883,6 +1918,10 @@ int main(int argc, char **argv)
             close(listen_fd);
             alarm(CONN_TIMEOUT);
             rc = read_request(cfd, &r);
+            /* 前面有反代（Cloudflare）时用它报的真实 IP，日志和限速才不会把所有人
+               当成同一台机器。直连时 g_trust_proxy 是关的，谁也没法伪造。 */
+            if (rc == 0 && g_trust_proxy && plausible_ip(r.fwd_ip))
+                snprintf(ip, sizeof ip, "%s", r.fwd_ip);
             if (rc == 0) handle(cfd, &r, ip);
             else if (rc == -2) send_text(cfd, 413, "413 Payload Too Large");
             else if (rc == -3) send_text(cfd, 400, "400 Bad Request");
