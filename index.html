@@ -4,13 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
 <title>Jujishou测试</title>
-<link rel="stylesheet" href="style.css?v=64c7f3d058">
+<link rel="stylesheet" href="style.css?v=6bdc41ac94">
 </head>
 <body>
 <div class="gate" id="gate" hidden>
   <div class="gate-box">
     <h2 class="gate-title">Jujishou 内测</h2>
-    <p class="gate-sub" id="gateSub">本站还在测试，需要一个一次性密钥才能进来</p>
+    <p class="gate-sub" id="gateSub">注册一个账号就能进来，不用任何密钥</p>
 
     <div class="gate-tabs">
       <button class="on" id="gTabReg">注册</button>
@@ -18,9 +18,6 @@
     </div>
 
     <div class="gate-form" id="gRegForm">
-      <label>一次性密钥
-        <input id="gRegCode" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false">
-      </label>
       <label>用户名
         <input id="gRegName" placeholder="2~32 位，中文也行" autocomplete="username" spellcheck="false">
       </label>
@@ -28,7 +25,7 @@
         <input id="gRegPass" type="password" placeholder="至少 6 位" autocomplete="new-password">
       </label>
       <button class="btn primary" id="gRegGo"><b>注册并开始</b></button>
-      <p class="gate-tip">密钥由站长发放，一枚只能用一次。注册之后这台设备一年内不用再输。</p>
+      <p class="gate-tip">不用邀请码，起个名字设个密码就能玩。注册之后这台设备一年内不用再登录。</p>
     </div>
 
     <div class="gate-form" id="gLoginForm" hidden>
@@ -120,7 +117,7 @@
   </div>
 </div>
 
-<script src="app.js?v=64c7f3d058"></script>
+<script src="app.js?v=6bdc41ac94"></script>
 
 <!-- 大隐藏（UR）出场演出。平时 hidden，抽到了才去取视频 -->
 <div class="ultra" id="ultra" hidden>

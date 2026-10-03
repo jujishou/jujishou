@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS users (
 -- 已经在跑的库要补这一列（新库走上面的 CREATE TABLE 就有了）：
 --   ALTER TABLE users ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0;
 
+-- 注意：2026-10-03 起注册不再需要邀请码，这张表已经不参与注册流程了，
+-- 留着只是因为后台那套「测试密钥」还在读写它。
 CREATE TABLE IF NOT EXISTS invites (
   code       TEXT PRIMARY KEY,        -- XXXX-XXXX-XXXX
   used       INTEGER NOT NULL DEFAULT 0,

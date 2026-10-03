@@ -20,6 +20,10 @@ const USER_TTL = 365 * 24 * 3600;
 const MAX_SAVE = 128 * 1024;
 const LOGIN_MAXFAIL = 5;
 const LOGIN_WINDOW = 600;
+/* 注册不再需要邀请码，所以给每个 IP 一个小时的开号上限，
+   免得有人刷脚本一口气注册几百个账号。 */
+const REG_MAX = 5;
+const REG_WINDOW = 3600;
 const LOG_KEEP = 400;
 // Crockford Base32：去掉了容易看错的 I L O U
 const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -188,8 +192,6 @@ function genCode() {
   return s;
 }
 
-const validCode = (c) => /^[A-Za-z0-9-]{8,32}$/.test(String(c || ''));
-
 /* ---------- 限速（管理员登录，按 IP） ---------- */
 
 async function failLocked(env, ip) {
@@ -221,6 +223,36 @@ async function failBump(env, ip) {
 
 async function failClear(env, ip) {
   await env.DB.prepare('DELETE FROM fails WHERE ip=?').bind(ip).run();
+}
+
+/* ---------- 注册限速 ----------
+   复用同一张 fails 表，但键加上 reg: 前缀，免得跟后台密钥的失败计数
+   撞在一起互相清空。这里数的是「成功开出多少个号」，不是失败次数。 */
+
+async function regCount(env, ip) {
+  const key = 'reg:' + ip;
+  const now = nowSec();
+  const r = await env.DB.prepare('SELECT count, first FROM fails WHERE ip=?').bind(key).first();
+  if (!r) return 0;
+  if (now - r.first > REG_WINDOW) {
+    await env.DB.prepare('DELETE FROM fails WHERE ip=?').bind(key).run();
+    return 0;
+  }
+  return r.count;
+}
+
+async function regBump(env, ip) {
+  const key = 'reg:' + ip;
+  const now = nowSec();
+  const r = await env.DB.prepare('SELECT count, first FROM fails WHERE ip=?').bind(key).first();
+  if (!r || now - r.first > REG_WINDOW) {
+    await env.DB.prepare(
+      'INSERT INTO fails(ip,count,first,locked) VALUES(?,1,?,0) ' +
+      'ON CONFLICT(ip) DO UPDATE SET count=1, first=excluded.first, locked=0'
+    ).bind(key, now).run();
+    return;
+  }
+  await env.DB.prepare('UPDATE fails SET count=? WHERE ip=?').bind(r.count + 1, key).run();
 }
 
 /* ---------- 审计日志 ---------- */
@@ -347,7 +379,12 @@ async function handleApi(request, env, url, ctx) {
     const form = parseForm(await request.text());
     const name = String(form.name || '').trim();
     const pass = String(form.pass || '');
-    const code = String(form.code || '').trim().toUpperCase();
+    /* 注册不再需要邀请码：谁都能开号，只按 IP 限速。老客户端可能还会多传一个
+       form.code 过来，这里不再去 invites 表核对，直接忽略。 */
+
+    if (await regCount(env, ip) >= REG_MAX) {
+      return json({ ok: false, err: 'rate', msg: '注册太频繁了，过一会儿再试' }, 429);
+    }
 
     if (!validName(name)) {
       return json({ ok: false, err: 'bad-name', msg: '用户名要 2~32 个字符，只能用字母、数字、下划线、连字符或中文' }, 400);
@@ -355,29 +392,18 @@ async function handleApi(request, env, url, ctx) {
     if (!validPass(pass)) {
       return json({ ok: false, err: 'bad-pass', msg: '密码至少 6 位' }, 400);
     }
-    if (!validCode(code)) {
-      return json({ ok: false, err: 'bad-code', msg: '密钥格式不对' }, 400);
-    }
-    const inv = await env.DB.prepare('SELECT code, used FROM invites WHERE code=?').bind(code).first();
-    if (!inv || inv.used) {
-      return json({ ok: false, err: 'bad-code', msg: '密钥无效或已经被用过了' }, 403);
-    }
     const nn = normName(name);
     const dup = await env.DB.prepare('SELECT uid FROM users WHERE name_norm=?').bind(nn).first();
     if (dup) {
-      // 注意：重名失败不消耗密钥
       return json({ ok: false, err: 'taken', msg: '这个名字已经被注册了' }, 409);
     }
 
     const uid = await uidOf(name);
     const now = nowSec();
     const line = await pwMake(pass);
-    await env.DB.batch([
-      env.DB.prepare('INSERT INTO users(uid,name,name_norm,pass,created) VALUES(?,?,?,?,?)')
-        .bind(uid, name, nn, line, now),
-      env.DB.prepare('UPDATE invites SET used=1, uid=?, used_at=? WHERE code=?')
-        .bind(uid, now, code)
-    ]);
+    await env.DB.prepare('INSERT INTO users(uid,name,name_norm,pass,created) VALUES(?,?,?,?,?)')
+      .bind(uid, name, nn, line, now).run();
+    await regBump(env, ip);
     // 老玩家在别的设备上留下的匿名存档，不再有 gpid 概念，跳过领养
 
     const tok = await makeToken(env, 'user', uid, now + USER_TTL);

@@ -116,3 +116,16 @@ npx wrangler secret put ADMIN_HASH            # 粘上面那串摘要
 > `if (!ctEq(key, String(env.ADMIN_HASH || '')))`，而 `ctEq('', '')` 返回 `true`。
 > 也就是说，只要 `ADMIN_HASH` 被删成 `undefined`，**任何人提交一个空 key 都能登进后台**。
 > 现在改成 `if (!key || !env.ADMIN_HASH || !ctEq(key, ...))`，空密钥显式挡掉。
+
+## 注册不再需要邀请码（2026-10-03）
+
+`POST /api/register` 现在只要 `name` + `pass`，`form.code` 直接忽略，不再去 `invites` 表核对。
+放开注册自然要防刷，所以加了一条按 IP 的限速：**`REG_MAX = 5` / `REG_WINDOW = 3600` 秒**，
+用的是 `fails` 表，键写成 `reg:<ip>` 前缀（不跟后台密钥的失败计数撞在一起）。
+数的是「成功开了几个号」，不是失败次数；超了返回 429 `{"err":"rate"}`。
+
+删掉的两样东西：`validCode()` 函数，以及注册里那段 `SELECT ... FROM invites` + `UPDATE invites`。
+`genCode()` 和后台那套「测试密钥」接口（`/api/admin/invites`、`/api/admin/invite/new`、
+`/api/admin/invite/delete`）**都还在**，但已经跟注册没关系了——留着当历史，别再拿它当门禁用。
+
+`invites` 表同理，没删，只是不再参与注册流程。

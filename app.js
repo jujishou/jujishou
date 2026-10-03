@@ -1952,17 +1952,15 @@ function gateSwitch(which) {
 }
 
 function gateDoRegister() {
-  var code = $('gRegCode').value.trim().toUpperCase();
   var name = $('gRegName').value.trim();
   var pass = $('gRegPass').value;
 
-  if (!code) { gateMsg('请先填一次性密钥'); return; }
   if (!name) { gateMsg('请填一个用户名'); return; }
   if ((pass || '').length < 6) { gateMsg('密码至少 6 位'); return; }
 
   $('gRegGo').disabled = true;
   gateMsg('正在注册…');
-  gatePost('api/register', { name: name, pass: pass, code: code })
+  gatePost('api/register', { name: name, pass: pass })
     .then(function (d) {
       $('gRegGo').disabled = false;
       if (!d || !d.ok) { gateMsg((d && d.msg) || '注册失败'); return; }
