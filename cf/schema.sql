@@ -6,8 +6,14 @@ CREATE TABLE IF NOT EXISTS users (
   name       TEXT NOT NULL,           -- 原样用户名（可能是中文）
   name_norm  TEXT NOT NULL UNIQUE,    -- ASCII 小写归一化，查重与登录用
   pass       TEXT NOT NULL,           -- pbkdf2$<iters>$<salt_hex>$<hash_hex>
-  created    INTEGER NOT NULL
+  created    INTEGER NOT NULL,
+  -- 最后一次在网站上活动的时间（秒）。后台靠它显示「在线 / 几分钟前」。
+  -- 只在登录、/api/me、读写存档时更新，且 60 秒内不重复写库。
+  last_seen  INTEGER NOT NULL DEFAULT 0
 );
+
+-- 已经在跑的库要补这一列（新库走上面的 CREATE TABLE 就有了）：
+--   ALTER TABLE users ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS invites (
   code       TEXT PRIMARY KEY,        -- XXXX-XXXX-XXXX

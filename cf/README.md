@@ -46,6 +46,8 @@ npx wrangler deploy
 | PBKDF2 轮数 | 120000 | **10000** —— Workers 免费版单请求 CPU 只有 10ms，12 万轮会被掐死 |
 | 「重启网站」 | 真的重启进程 | 没有进程可重启，改成把 `meta.boot` 写成当前时间，前端轮询发现 `boot` 变了就刷新 |
 | 真实 IP | 走 `CF-Connecting-IP`（要开 `GACHA_TRUST_PROXY`） | 天然就是 `CF-Connecting-IP` |
+| 「在线状态」 | 没有 | `users.last_seen`，登录 / `/api/me` / 读写存档时更新，60 秒内不重复写库 |
+| 「改密码」 | 没有 | `POST /api/admin/user/pass` 生成新密码；密码是 PBKDF2 哈希，**原文无论如何都看不到** |
 
 > ⚠️ 因为 PBKDF2 轮数不同，**老服务器上已注册的账号不能直接迁到这边**。
 > 迁移当时老站 `users` 是空的，所以没有实际损失。新后端的口令记录里带着轮数
@@ -67,3 +69,28 @@ npx wrangler deploy
 
 `*.workers.dev` 在国内被 DNS 污染（解析到 `2a03:2880:...:face:b00c:...`，那是 Meta 的地址），
 所以本机根本连不上 `jujishou-gacha.<subdomain>.workers.dev` —— **测试必须走自己的域名**。
+
+## 静态文件被边缘缓存 · 一个很隐蔽的坑
+
+改完 `app.js` / `style.css` 上传后，线上首页拿到的 `?v=` 还是旧摘要。
+`curl -sI https://jujishou.dpdns.org/` 返回的是 `cf-cache-status: HIT` +
+`cache-control: public, max-age=0, must-revalidate`，可 Worker 里明明设了 `no-store`。
+
+原因是 **Workers Assets 默认 `run_worker_first = false`**：请求只要命中静态文件，
+就由 Assets 直接返回，Worker 的 `fetch` 根本不执行，所以 Worker 里设的任何响应头都不生效。
+
+修法两步：
+
+1. `wrangler.toml` 的 `[assets]` 加 `run_worker_first = true`；
+2. Worker 的静态分支自己接管缓存头：HTML → `no-store` + `CDN-Cache-Control: no-store`；
+   带 `?v=` 的 CSS/JS → `public, max-age=31536000, immutable`；其余 → `public, max-age=300`。
+
+## 后台的「在线状态 / 详情 / 改密码」
+
+- **在线状态**：`users.last_seen`，3 分钟内算「在线」（绿点），否则显示「N 分钟前 / N 小时前 / N 天前」，
+  从没登录过显示「未登录过」。写入有三处：玩家登录成功、`/api/me`、读写存档；60 秒内的重复访问直接跳过。
+- **详情面板**：点「详情」把存档翻译成人话 —— 账号信息、各卡池（抽数 / UR / SR / R / UR 保底计数）、
+  图鉴（抽到过的卡 + 张数 + 稀有度配色）、最近 10 抽。原始 JSON 收在最底下的折叠里，默认不展开。
+- **改密码**：密码存的是 PBKDF2 哈希（`pbkdf2$10000$<salt>$<hash>`），**技术上无法反推原文**，
+  所以后台能做的只有「换一个新密码」。点了会用 `crypto.getRandomValues` 生成 8 位好念的新密码
+  （字符集避开 `l/1/o/0`），返回一次给管理员，旧密码立刻失效。

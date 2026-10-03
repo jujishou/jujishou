@@ -1363,6 +1363,97 @@ function tryUnlock() {
 }
 
 /* --- 玩家列表渲染 --- */
+
+/* 最后一次活跃时间 → 人话 + 颜色类。3 分钟内有请求就算「在线」。 */
+function seenInfo(ts) {
+  var now = Math.floor(Date.now() / 1000);
+  if (!ts) return { text: '未登录过', cls: 'off' };
+  var d = now - ts;
+  if (d < 0) d = 0;
+  if (d < 180) return { text: '在线', cls: 'on' };
+  if (d < 3600) return { text: Math.floor(d / 60) + ' 分钟前', cls: 'off' };
+  if (d < 86400) return { text: Math.floor(d / 3600) + ' 小时前', cls: 'off' };
+  return { text: Math.floor(d / 86400) + ' 天前', cls: 'off' };
+}
+
+function pdItem(k, v, mono) {
+  return '<div class="pd-i"><span>' + adminEsc(k) + '</span><code' +
+    (mono ? ' class="mono"' : '') + '>' + adminEsc(String(v)) + '</code></div>';
+}
+
+/* 详情面板：把存档里那些给玩家看的东西翻译成人话，
+   原始 JSON 收进最后那个折叠里，默认不展开。 */
+function playerDetailHTML(p) {
+  var sv = null;
+  try { sv = JSON.parse(p.raw); } catch (e) { sv = null; }
+  var h = '<div class="pd">';
+
+  h += '<div class="pd-sec"><h4>账号</h4><div class="pd-grid">' +
+    pdItem('名字', p.hasAccount ? p.name : '（没有账号，只有存档）') +
+    pdItem('UID', p.uid, true) +
+    pdItem('注册时间', p.created ? fmtTime(p.created) : '—') +
+    pdItem('最后活跃', p.lastSeen ? fmtTime(p.lastSeen) + '（' + seenInfo(p.lastSeen).text + '）' : '从未') +
+    pdItem('存档大小', fmtSize(p.bytes)) +
+    pdItem('存档更新', p.mtime ? fmtTime(p.mtime) : '—') +
+    '</div></div>';
+
+  if (sv && sv.pools) {
+    var rows = '';
+    POOLS.forEach(function (pool) {
+      var d = sv.pools[pool.id] || {};
+      var got = d.got || {};
+      rows += '<tr><td>' + adminEsc(pool.name) + '</td>' +
+        '<td>' + (Number(d.pulls) || 0) + ' 抽</td>' +
+        '<td class="ur">' + (Number(got.UR) || 0) + '</td>' +
+        '<td>' + (Number(got.SR) || 0) + '</td>' +
+        '<td>' + (Number(got.R) || 0) + '</td>' +
+        '<td>' + (Number(d.pityUR) || 0) + '</td></tr>';
+    });
+    h += '<div class="pd-sec"><h4>各卡池</h4><table class="pd-t"><thead><tr>' +
+      '<th>卡池</th><th>抽数</th><th>大隐藏</th><th>SR</th><th>R</th><th>UR 保底计数</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  if (sv && sv.counts) {
+    var owned = Object.keys(sv.counts).filter(function (id) { return CARDS[id]; });
+    var order = { UR: 0, SSR: 1, SR: 2, R: 3 };
+    var withRarity = owned.map(function (id) {
+      var r = 'R';
+      POOLS.forEach(function (pool) {
+        pool.entries.forEach(function (e) { if (e.id === id) r = e.rarity; });
+      });
+      return { id: id, n: sv.counts[id], rarity: r };
+    }).sort(function (a, b) { return order[a.rarity] - order[b.rarity] || b.n - a.n; });
+
+    h += '<div class="pd-sec"><h4>图鉴（抽到过的卡）</h4><div class="pd-cards">' +
+      withRarity.map(function (c) {
+        return '<span class="pd-card" data-r="' + c.rarity + '">' +
+          adminEsc(CARDS[c.id].name) + '<em>×' + c.n + '</em></span>';
+      }).join('') + '</div></div>';
+  }
+
+  if (sv && sv.history && sv.history.length) {
+    var recent = sv.history.slice(0, 10);
+    h += '<div class="pd-sec"><h4>最近 10 抽</h4><div class="pd-hist">' +
+      recent.map(function (e) {
+        return '<div class="pd-h" data-r="' + adminEsc(e.rarity || 'R') + '">' +
+          '<span>#' + (e.no || '?') + '</span>' +
+          '<em>' + adminEsc(e.rarity || '?') + '</em>' +
+          '<span>' + adminEsc(e.name || e.id || '?') + '</span>' +
+          '<span class="dim">' + adminEsc(e.poolName || e.pool || '') + '</span>' +
+          '</div>';
+      }).join('') + '</div></div>';
+  }
+
+  if (p.raw) {
+    h += '<details class="fold pd-raw"><summary>原始存档 JSON</summary>' +
+      '<pre class="code code-block">' + adminEsc(p.raw) + '</pre></details>';
+  }
+
+  h += '</div>';
+  return h;
+}
+
 function paintPlayers() {
   var box = $('adminPlayers'), cnt = $('aPCount');
   if (!box) return;
@@ -1382,6 +1473,7 @@ function paintPlayers() {
       ur: sv.ur || 0,
       bytes: u.bytes || sv.bytes || 0,
       mtime: u.mtime || 0,
+      lastSeen: u.last_seen || 0,
       raw: sv.raw || ''
     };
   });
@@ -1393,7 +1485,7 @@ function paintPlayers() {
     if (!hit) list.push({
       uid: p.uid, name: p.name || '(匿名存档)', hasAccount: false,
       created: 0, pulls: p.pulls || 0, ur: p.ur || 0,
-      bytes: p.bytes || 0, mtime: 0, raw: p.raw || ''
+      bytes: p.bytes || 0, mtime: p.mtime || 0, lastSeen: 0, raw: p.raw || ''
     });
   });
 
@@ -1420,14 +1512,19 @@ function paintPlayers() {
   }
 
   box.innerHTML = list.map(function (p) {
+    var seen = seenInfo(p.lastSeen);
     return '<div class="prow" data-uid="' + adminEsc(p.uid) + '">' +
       '<span class="pname" title="' + adminEsc(p.uid) + '">' + adminEsc(p.name) +
         (p.hasAccount ? '' : ' <em class="tag">无账号</em>') + '</span>' +
+      '<span class="seen ' + seen.cls + '" title="最后活跃：' +
+        (p.lastSeen ? fmtTime(p.lastSeen) : '从未') + '">' +
+        '<i></i>' + adminEsc(seen.text) + '</span>' +
       '<span class="pm">' + p.pulls + ' 抽 · <em>UR ' + p.ur + '</em> · ' + fmtSize(p.bytes) +
         (p.created ? ' · ' + fmtTime(p.created) + ' 注册' : '') + '</span>' +
+      (p.hasAccount ? '<button class="mini" data-act="pass">改密码</button>' : '') +
       (p.raw ? '<button class="mini" data-act="raw">详情</button>' : '') +
       '<button class="mini del" data-act="del">删除</button>' +
-      (p.raw ? '<pre class="code code-block" hidden>' + adminEsc(p.raw) + '</pre>' : '') +
+      (p.raw ? '<div class="pdetail" hidden></div>' : '') +
     '</div>';
   }).join('');
 }
@@ -1644,9 +1741,37 @@ document.addEventListener('click', function (e) {
   var act = btn.getAttribute('data-act');
 
   if (act === 'raw') {
-    var pre = row.querySelector('pre');
-    if (pre) pre.hidden = !pre.hidden;
-    btn.textContent = pre && pre.hidden ? '详情' : '收起';
+    var box = row.querySelector('.pdetail');
+    if (!box) return;
+    if (!box.innerHTML) {
+      var item = null;
+      for (var i = 0; i < adminState.players.length; i++) {
+        if (adminState.players[i].uid === uid) { item = adminState.players[i]; break; }
+      }
+      if (item) box.innerHTML = playerDetailHTML(item);
+      else return;
+    }
+    box.hidden = !box.hidden;
+    btn.textContent = box.hidden ? '详情' : '收起';
+    return;
+  }
+
+  if (act === 'pass') {
+    if (!confirm('给「' + uid + '」换一个新密码？\n旧密码会立刻失效，新密码只显示这一次，' +
+                 '记得复制下来发给对方。')) return;
+    btn.disabled = true;
+    api('/api/admin/user/pass', { method: 'POST', body: 'uid=' + encodeURIComponent(uid) })
+      .then(function (r) {
+        btn.disabled = false;
+        if (r.ok && r.data && r.data.ok) {
+          adminMsg('「' + (r.data.name || uid) + '」的新密码：' + r.data.pass +
+                   '（复制下来发给对方，关掉就看不到了）', 'good');
+          try { copyText(r.data.pass, null); } catch (e) {}
+        } else {
+          alert('重置失败：' + ((r.data && r.data.msg) || '未知错误'));
+        }
+      })
+      .catch(function () { btn.disabled = false; alert('无法连接服务器'); });
     return;
   }
 

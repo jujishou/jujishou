@@ -168,6 +168,16 @@ async function pwCheck(pass, line) {
 
 /* ---------- 一次性密钥 ---------- */
 
+/* 好念的新密码：小写字母 + 数字，避开 l/1/o/0 这些容易看错的分不清的字符 */
+function genPassword() {
+  const A = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const b = new Uint8Array(8);
+  crypto.getRandomValues(b);
+  let out = '';
+  for (let i = 0; i < 8; i++) out += A[b[i] % A.length];
+  return out;
+}
+
 function genCode() {
   const raw = crypto.getRandomValues(new Uint8Array(12));
   let s = '';
@@ -273,6 +283,17 @@ async function currentUser(request, env) {
   return checkToken(env, 'user', parseCookies(request).guid);
 }
 
+/* 记录「这个账号最后一次在网站上活动」是什么时候。
+   后台靠它显示在线状态。写库有成本，所以 60 秒内的重复访问就跳过。 */
+async function touchUser(env, ctx, uid) {
+  if (!uid) return;
+  const now = nowSec();
+  const p = env.DB.prepare(
+    'UPDATE users SET last_seen=? WHERE uid=? AND last_seen<?'
+  ).bind(now, uid, now - 60).run().catch(function () {});
+  if (ctx && ctx.waitUntil) ctx.waitUntil(p); else await p;
+}
+
 async function isAdmin(request, env) {
   return (await checkToken(env, 'admin', parseCookies(request).gsid)) !== null;
 }
@@ -373,6 +394,7 @@ async function handleApi(request, env, url, ctx) {
       return json({ ok: false, err: 'bad-login', msg: '用户名或密码不对' }, 401);
     }
     const tok = await makeToken(env, 'user', row.uid, nowSec() + USER_TTL);
+    await touchUser(env, ctx, row.uid);
     return json({ ok: true }, 200,
       { 'Set-Cookie': cookieStr('guid', tok, USER_TTL, 'Lax', secure) });
   }
@@ -387,6 +409,7 @@ async function handleApi(request, env, url, ctx) {
     if (!uid) return json({ ok: true, signedIn: false });
     const row = await env.DB.prepare('SELECT name FROM users WHERE uid=?').bind(uid).first();
     if (!row) return json({ ok: true, signedIn: false });
+    await touchUser(env, ctx, uid);
     return json({ ok: true, signedIn: true, name: row.name, uid: uid });
   }
 
@@ -394,6 +417,7 @@ async function handleApi(request, env, url, ctx) {
   if (path === '/api/save') {
     const uid = await currentUser(request, env);
     if (!uid) return json({ ok: false, err: 'no-account', msg: '请先注册或登录' }, 401);
+    await touchUser(env, ctx, uid);
 
     if (method === 'GET') {
       const row = await env.DB.prepare('SELECT data FROM saves WHERE uid=?').bind(uid).first();
@@ -466,11 +490,25 @@ async function handleApi(request, env, url, ctx) {
     if (path === '/api/admin/users') {
       const rs = await env.DB.prepare(
         'SELECT u.uid AS uid, u.name AS name, u.created AS created, ' +
+        'COALESCE(u.last_seen,0) AS last_seen, ' +
         'COALESCE(s.bytes,0) AS bytes, COALESCE(s.total,0) AS pulls, COALESCE(s.mtime,0) AS mtime ' +
         'FROM users u LEFT JOIN saves s ON s.uid = u.uid ORDER BY u.created DESC LIMIT 500'
       ).all();
       const users = rs.results || [];
       return json({ ok: true, users: users, count: users.length });
+    }
+
+    /* 重置某个玩家的密码。密码是 PBKDF2 哈希存的，原文没法反推出来，
+       所以「查看密码」这件事在技术上不存在；能给的是「换一个新密码」。 */
+    if (path === '/api/admin/user/pass' && method === 'POST') {
+      const form = parseForm(await request.text());
+      const uid = String(form.uid || '');
+      if (!uid) return json({ ok: false, err: 'no-uid' }, 400);
+      const row = await env.DB.prepare('SELECT name FROM users WHERE uid=?').bind(uid).first();
+      if (!row) return json({ ok: false, err: 'no-user', msg: '没有这个账号' }, 404);
+      const pw = genPassword();
+      await env.DB.prepare('UPDATE users SET pass=? WHERE uid=?').bind(await pwMake(pw), uid).run();
+      return json({ ok: true, name: row.name, pass: pw });
     }
 
     if (path === '/api/admin/user/delete' && method === 'POST') {
