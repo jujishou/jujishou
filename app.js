@@ -311,23 +311,24 @@ function isLocked(card, rarity) {
 let audioCtx = null;
 function beep(rarity) {
   if (state.muted) return;
+  const ac = ensureAudio();
+  if (!ac) return;
   try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     const notes =
       rarity === 'UR'  ? [523, 659, 784, 1047, 1319] :
       rarity === 'SSR' ? [523, 659, 784, 1047] :
       rarity === 'SR'  ? [440, 587] : [330];
     const vol = rarity === 'R' ? 0.05 : (rarity === 'UR' ? 0.14 : 0.12);
     notes.forEach(function (freq, i) {
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      const t0 = audioCtx.currentTime + i * 0.07;
+      const osc = ac.createOscillator();
+      const gain = ac.createGain();
+      const t0 = ac.currentTime + i * 0.07;
       osc.type = rarity === 'R' ? 'triangle' : 'sine';
       osc.frequency.value = freq;
       gain.gain.setValueAtTime(0.0001, t0);
       gain.gain.exponentialRampToValueAtTime(vol, t0 + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.34);
-      osc.connect(gain).connect(audioCtx.destination);
+      osc.connect(gain).connect(ac.destination);
       osc.start(t0);
       osc.stop(t0 + 0.36);
     });
@@ -433,6 +434,7 @@ function renderTabs() {
     b.innerHTML = '<b>' + p.tab + '</b><small>' + p.name + '</small>';
     b.addEventListener('click', function () {
       if (busy || state.current === p.id) return;
+      sfxSwitch();
       state.current = p.id;
       save();
       stage.innerHTML = '<p class="hint">已切换到「' + p.name + '」，点击下方按钮开始抽卡 ✦</p>';
@@ -524,28 +526,326 @@ function renderAll() {
   refreshAdminLive();
 }
 
+/* ---------- 界面音效 ---------- */
+/* 移动端 AudioContext 一开始是 suspended，必须借用户的一次点击把它唤醒。
+   抽卡、切卡池都是点击触发的，所以放在这里 resume 最自然。 */
+function ensureAudio() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) { return null; }
+  return audioCtx;
+}
+
+/* 通用「点一下」音：很短，频率往下滑一点，听着像 UI 反馈 */
+function sfxTap(freq) {
+  if (state.muted) return;
+  const ac = ensureAudio();
+  if (!ac) return;
+  try {
+    const f0 = freq || 1180;
+    const t0 = ac.currentTime;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(f0, t0);
+    osc.frequency.exponentialRampToValueAtTime(f0 * 0.62, t0 + 0.055);
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.05, t0 + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.075);
+    osc.connect(gain).connect(ac.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.09);
+  } catch (e) { /* 无音频环境则静默 */ }
+}
+
+/* 切换卡池：两个音往上走，像「翻过去了」 */
+function sfxSwitch() {
+  if (state.muted) return;
+  const ac = ensureAudio();
+  if (!ac) return;
+  try {
+    [660, 988].forEach(function (f, i) {
+      const t0 = ac.currentTime + i * 0.062;
+      const osc = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = f;
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(0.062, t0 + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.13);
+      osc.connect(gain).connect(ac.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.15);
+    });
+  } catch (e) { /* 静默 */ }
+}
+
+/* 开面板、展开展开这类动作：一声轻轻的「嗒」 */
+function sfxOpen() {
+  if (state.muted) return;
+  const ac = ensureAudio();
+  if (!ac) return;
+  try {
+    const t0 = ac.currentTime;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(420, t0);
+    osc.frequency.exponentialRampToValueAtTime(880, t0 + 0.09);
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.045, t0 + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.12);
+    osc.connect(gain).connect(ac.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.14);
+  } catch (e) { /* 静默 */ }
+}
+
+/* ---------- 大隐藏（UR）出场演出 ---------- */
+/* 抽到 UR 时：先全屏放一段视频，视频结束再把卡片从爆光里冲出来。
+   视频按需加载（第一次抽到才去取），加载失败或不允许自动播放就直接进动画。
+   全程点一下可以跳过：视频阶段点了进卡片，卡片阶段点了收尾。 */
+
+var ULTRA_VIDEO_SRC = 'art/ur-intro.mp4';
+var ULTRA_VIDEO_TIMEOUT = 2500;    /* 视频这么久还没开始播就当它不行 */
+var ULTRA_VIDEO_MAXWAIT = 16000;   /* 视频最长放这么久，防止卡死 */
+var ULTRA_CARD_HOLD = 2600;        /* 卡片冲出来之后停留多久 */
+var ultraRefs = null;
+
+function ultraDom() {
+  if (ultraRefs) return true;
+  const el = document.getElementById('ultra');
+  if (!el) return false;
+  ultraRefs = {
+    root:   el,
+    video:  document.getElementById('ultraVideo'),
+    vig:    document.getElementById('ultraVig'),
+    stage:  document.getElementById('ultraStage'),
+    white:  document.getElementById('ultraWhite'),
+    card:   document.getElementById('ultraCard'),
+    sparks: document.getElementById('ultraSparks'),
+    tip:    document.getElementById('ultraTip'),
+  };
+  return true;
+}
+
+function ultraSparks(n) {
+  const host = ultraRefs.sparks;
+  if (!host) return;
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < n; i++) {
+    const s = document.createElement('i');
+    const ang = Math.random() * Math.PI * 2;
+    const dist = 80 + Math.random() * 320;
+    s.style.setProperty('--sx', (Math.cos(ang) * dist).toFixed(0) + 'px');
+    s.style.setProperty('--sy', (Math.sin(ang) * dist).toFixed(0) + 'px');
+    s.style.animationDelay = (Math.random() * 0.24).toFixed(2) + 's';
+    if (Math.random() < 0.45) {
+      s.style.background = '#ffd9ff';
+      s.style.boxShadow = '0 0 10px 2px rgba(255,120,255,.95)';
+    }
+    frag.appendChild(s);
+  }
+  host.appendChild(frag);
+}
+
+function playUltra(item, done) {
+  if (!ultraDom()) { done(); return; }
+
+  const r = ultraRefs;
+  let closed = false;
+  let phase = 'video';        /* 'video' | 'card' */
+  let movedOn = false;
+  let cardTimer = null, guardTimer = null, maxTimer = null;
+
+  function onEnded() { toCard(); }
+  function onError() { toCard(); }
+  function onPlaying() {
+    clearTimeout(guardTimer);
+    r.video.removeEventListener('playing', onPlaying);
+  }
+  function detachVideo() {
+    clearTimeout(guardTimer);
+    clearTimeout(maxTimer);
+    r.video.removeEventListener('ended', onEnded);
+    r.video.removeEventListener('error', onError);
+    r.video.removeEventListener('playing', onPlaying);
+  }
+
+  function finish() {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKey, true);
+    r.root.classList.add('out');
+    setTimeout(function () {
+      r.root.hidden = true;
+      r.root.classList.remove('on', 'out', 'ultra-quake');
+      try { r.video.pause(); } catch (e) {}
+      r.video.removeAttribute('src');
+      try { r.video.load(); } catch (e) {}
+      r.video.hidden = false;
+      r.video.classList.remove('gone');
+      r.vig.classList.remove('gone');
+      r.stage.hidden = true;
+      r.stage.classList.remove('on');
+      r.white.classList.remove('go');
+      r.sparks.innerHTML = '';
+      done();
+    }, 330);
+  }
+
+  /* 白闪 + 震屏 + 卡片冲出来 */
+  function showCard() {
+    if (closed) return;
+    phase = 'card';
+
+    r.video.classList.add('gone');
+    r.vig.classList.add('gone');
+    r.tip.textContent = '点击任意处继续 »';
+
+    setTimeout(function () {
+      if (closed) return;
+
+      r.video.hidden = true;
+      r.stage.hidden = false;
+      r.stage.classList.add('on');
+
+      r.white.classList.remove('go');
+      void r.white.offsetWidth;
+      r.white.classList.add('go');
+
+      r.root.classList.remove('ultra-quake');
+      void r.root.offsetWidth;
+      r.root.classList.add('ultra-quake');
+
+      const card = item.card || CARDS[item.id];
+      const color = RARITY[item.rarity] || RARITY.UR;
+      r.card.innerHTML =
+        '<img src="' + card.art + '" alt="' + card.name + '" style="' + artStyle(card) + '">' +
+        '<span class="uc-tag">' + color.label + '</span>' +
+        '<div class="uc-name">' + card.name + '</div>';
+
+      ultraSparks(70);
+
+      cardTimer = setTimeout(finish, ULTRA_CARD_HOLD);
+    }, 380);
+  }
+
+  function toCard() {
+    if (movedOn || closed) return;
+    movedOn = true;
+    detachVideo();
+    showCard();
+  }
+
+  function skip() {
+    if (closed) return;
+    if (phase === 'card') {
+      clearTimeout(cardTimer);
+      finish();
+      return;
+    }
+    toCard();
+  }
+
+  function onKey(e) {
+    if (e.key === 'Escape' || e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      skip();
+    }
+  }
+
+  /* ---- 开场 ---- */
+  r.root.hidden = false;
+  r.root.classList.remove('out');
+  r.video.hidden = false;
+  r.video.classList.remove('gone');
+  r.vig.classList.remove('gone');
+  r.stage.hidden = true;
+  r.stage.classList.remove('on');
+  r.white.classList.remove('go');
+  r.sparks.innerHTML = '';
+  r.tip.textContent = '点击任意处跳过 »';
+  void r.root.offsetWidth;
+  r.root.classList.add('on');
+
+  r.root.onclick = function () { skip(); };
+  document.addEventListener('keydown', onKey, true);
+
+  /* ---- 视频 ---- */
+  let videoOk = false;
+  guardTimer = setTimeout(function () { if (!videoOk) toCard(); }, ULTRA_VIDEO_TIMEOUT);
+  maxTimer = setTimeout(function () { toCard(); }, ULTRA_VIDEO_MAXWAIT);
+
+  r.video.addEventListener('ended', onEnded);
+  r.video.addEventListener('error', onError);
+  r.video.addEventListener('playing', onPlaying);
+
+  /* 原声保留；站点静音开关关掉时视频也不出声 */
+  r.video.muted = !!state.muted;
+  r.video.volume = 1;
+
+  if (!r.video.getAttribute('src')) r.video.setAttribute('src', ULTRA_VIDEO_SRC);
+
+  let playPromise = null;
+  try { playPromise = r.video.play(); } catch (e) { playPromise = null; }
+  if (playPromise && typeof playPromise.catch === 'function') {
+    playPromise.catch(function () {
+      /* 自动播放被拦：先试静音再放一次，仍不行就直接进卡片 */
+      if (closed || movedOn) return;
+      try {
+        r.video.muted = true;
+        const p2 = r.video.play();
+        if (p2 && typeof p2.catch === 'function') p2.catch(function () { toCard(); });
+      } catch (e) { toCard(); }
+    });
+  }
+}
+
 /* ---------- 抽卡交互 ---------- */
 function pull(n) {
   if (busy) return;
   busy = true;
   document.querySelectorAll('.btn').forEach(function (b) { b.disabled = true; });
+  sfxTap();
 
   const poolId = state.current;
   const items = [];
   for (let i = 0; i < n; i++) items.push(drawOne(poolId));
 
   save();
-  renderResults(items);
-  renderStats();
-  renderBanner();
-  renderGallery();
-  setTimeout(renderLog, 200);
-  setTimeout(refreshAdminLive, 60);
 
-  setTimeout(function () {
-    busy = false;
-    document.querySelectorAll('.btn').forEach(function (b) { b.disabled = false; });
-  }, 120 + items.length * 110 + 700);
+  let urItem = null;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].rarity === 'UR') { urItem = items[i]; break; }
+  }
+
+  /* 摆结果 + 放开按钮 */
+  function settle() {
+    renderResults(items);
+    renderStats();
+    renderBanner();
+    renderGallery();
+    setTimeout(renderLog, 200);
+    setTimeout(refreshAdminLive, 60);
+    setTimeout(function () {
+      busy = false;
+      document.querySelectorAll('.btn').forEach(function (b) { b.disabled = false; });
+    }, 120 + items.length * 110 + 700);
+  }
+
+  if (urItem) {
+    /* 抽到大隐藏：先放演出，演完再摆卡。演出期间 busy 一直压着，防连点 */
+    renderStats();
+    renderBanner();
+    renderGallery();
+    stage.innerHTML = '';
+    playUltra(urItem, settle);
+  } else {
+    settle();
+  }
 }
 
 pull1Btn.addEventListener('click', function () { pull(1); });
@@ -554,11 +854,13 @@ pull10Btn.addEventListener('click', function () { pull(10); });
 muteBtn.addEventListener('click', function () {
   state.muted = !state.muted;
   save();
+  if (!state.muted) sfxTap();
   renderAll();
 });
 
 $('resetBtn').addEventListener('click', function () {
   if (!confirm('确定要清空全部卡池的抽卡记录、图鉴与保底进度吗？')) return;
+  sfxOpen();
   Object.assign(state, blank());
   save();
   stage.innerHTML = '<p class="hint">选择卡池，点击下方按钮开始抽卡 ✦</p>';

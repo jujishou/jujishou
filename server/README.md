@@ -89,6 +89,8 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
 后台五个接口都要求 `gsid` Cookie，没有就是 401 —— 前端改不了这个事实。
 `delete` 与 `restart` 是写操作，只接受 POST，用 GET 打它们会得到 405。
 
+不支持的扩展名一律 `application/octet-stream`；已认得 `.html/.css/.js/.json/.svg/.jpg/.png/.webp/.gif/.ico/.txt/.mp4/.webm/.woff2`。
+
 ## 重启是怎么实现的
 
 每个连接由 `fork()` 出来的子进程处理，监听进程是它们的父进程。`POST /api/admin/restart` 走的顺序是：
@@ -121,7 +123,11 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
 - **稳健性**：每个连接 `fork()` 一个子进程并 `alarm(25)`；请求头上限 16 KB、请求体上限 256 KB；
   写入用「临时文件 + rename + fsync」，中途断电不会留半个文件。
   不支持 `Transfer-Encoding: chunked`，见到就直接 400；没有 `Content-Length` 的 POST 按空 body 处理。
-- **缓存**：`html` / `js` / `css` 返回 `no-cache`（保证更新后在线的人能换到新版本），图片走 `max-age=3600`。
+- **缓存**：`html` / `js` / `css` 返回 `no-cache`（保证更新后在线的人能换到新版本），图片和视频走 `max-age=3600`。
+- **Range 请求**：静态文件支持 `bytes=N-M` / `bytes=N-` / `bytes=-N` 三种写法，
+  命中就回 `206 Partial Content` + `Content-Range`，越界回 `416`；
+  没有 Range 的请求照旧 `200`，但也会带 `Accept-Ranges: bytes`。
+  视频尤其需要这个 —— Safari 看不到 `206` 会干脆不播。
 - **最小化二进制**：静态链接、无外部依赖，不引入任何需要联网或需要包管理器的组件。
 
 ## 已知边界

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Jujishou测试</title>
-<link rel="stylesheet" href="style.css?v=a7330ce57d">
+<link rel="stylesheet" href="style.css?v=2651ca5a33">
 </head>
 <body>
 <div class="sky" id="sky"></div>
@@ -80,6 +80,23 @@
   </div>
 </div>
 
-<script src="app.js?v=a7330ce57d"></script>
+<script src="app.js?v=2651ca5a33"></script>
+
+<!-- 大隐藏（UR）出场演出。平时 hidden，抽到了才去取视频 -->
+<div class="ultra" id="ultra" hidden>
+  <video class="ultra-video" id="ultraVideo" playsinline webkit-playsinline preload="none"></video>
+  <div class="ultra-vig" id="ultraVig"></div>
+
+  <div class="ultra-stage" id="ultraStage" hidden>
+    <div class="ultra-halo"></div>
+    <div class="ultra-rays"></div>
+    <div class="ultra-white" id="ultraWhite"></div>
+    <div class="ultra-shock"></div>
+    <div class="ultra-card" id="ultraCard"></div>
+    <div class="ultra-sparks" id="ultraSparks"></div>
+  </div>
+
+  <div class="ultra-tip" id="ultraTip">点击任意处跳过 »</div>
+</div>
 </body>
 </html>

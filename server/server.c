@@ -76,6 +76,8 @@ static const char *mime_of(const char *path)
     if (!strcasecmp(dot, ".gif"))   return "image/gif";
     if (!strcasecmp(dot, ".ico"))   return "image/x-icon";
     if (!strcasecmp(dot, ".txt"))   return "text/plain; charset=utf-8";
+    if (!strcasecmp(dot, ".mp4"))   return "video/mp4";
+    if (!strcasecmp(dot, ".webm"))  return "video/webm";
     if (!strcasecmp(dot, ".woff2")) return "font/woff2";
     return "application/octet-stream";
 }
@@ -88,6 +90,7 @@ static void send_head(int fd, int code, const char *ctype, size_t len,
     switch (code) {
     case 200: reason = "OK"; break;
     case 204: reason = "No Content"; break;
+    case 206: reason = "Partial Content"; break;
     case 400: reason = "Bad Request"; break;
     case 401: reason = "Unauthorized"; break;
     case 403: reason = "Forbidden"; break;
@@ -95,6 +98,7 @@ static void send_head(int fd, int code, const char *ctype, size_t len,
     case 405: reason = "Method Not Allowed"; break;
     case 413: reason = "Payload Too Large"; break;
     case 414: reason = "URI Too Long"; break;
+    case 416: reason = "Range Not Satisfiable"; break;
     case 429: reason = "Too Many Requests"; break;
     case 500: reason = "Internal Server Error"; break;
     default: break;
@@ -138,6 +142,7 @@ typedef struct {
     char   path[1024];
     char   query[2048];
     char   cookie[2048];
+    char   range[128];      /* Range 请求头，视频要用 */
     char  *body;
     size_t bodylen;
 } req_t;
@@ -232,6 +237,8 @@ static int read_request(int fd, req_t *r)
                     has_te = 1;          /* 不支持 chunked，见到就拒 */
                 } else if (!strcasecmp(line, "Cookie")) {
                     snprintf(r->cookie, sizeof r->cookie, "%s", val);
+                } else if (!strcasecmp(line, "Range")) {
+                    snprintf(r->range, sizeof r->range, "%s", val);
                 }
             }
         }
@@ -510,12 +517,62 @@ static void access_log(const char *ip, const char *method,
 }
 
 /* ---------- 静态文件 ---------- */
-static int serve_static(int fd, const char *rawpath)
+
+/* 支持 Range 请求。视频（尤其 Safari）看不到 206 就干脆不播，
+   所以这块不能省：解析 bytes=N-M / bytes=N- / bytes=-N 三种写法。
+   返回 1 表示已经回过响应（206 或 416），0 表示当作没有 Range 全量发。 */
+static int serve_range(int fd, const char *ctype, const char *data, size_t len,
+                       const char *range, const char *cache, int *code_out)
+{
+    long long start = 0, end = 0;
+    const char *p;
+    char hdr[512];
+
+    if (!range || !*range) return 0;
+    if (strncasecmp(range, "bytes=", 6) != 0) return 0;
+    p = range + 6;
+
+    if (*p == '-') {                      /* bytes=-N：最后 N 字节 */
+        long long n = atoll(p + 1);
+        if (n <= 0) return 0;
+        start = (long long)len - n;
+        if (start < 0) start = 0;
+        end = (long long)len - 1;
+    } else {
+        const char *dash = strchr(p, '-');
+        start = atoll(p);
+        if (!dash) return 0;
+        if (dash[1] >= '0' && dash[1] <= '9') end = atoll(dash + 1);
+        else end = (long long)len - 1;    /* bytes=N-：到文件尾 */
+    }
+
+    if (start < 0 || start > end || start >= (long long)len) {
+        snprintf(hdr, sizeof hdr, "Content-Range: bytes */%lu\r\n%s",
+                 (unsigned long)len, cache ? cache : "");
+        send_head(fd, 416, "text/plain; charset=utf-8", 0, hdr);
+        if (code_out) *code_out = 416;
+        return 1;
+    }
+    if (end > (long long)len - 1) end = (long long)len - 1;
+
+    snprintf(hdr, sizeof hdr,
+             "Accept-Ranges: bytes\r\n"
+             "Content-Range: bytes %lld-%lld/%lu\r\n"
+             "%s",
+             start, end, (unsigned long)len, cache ? cache : "");
+    send_head(fd, 206, ctype, (size_t)(end - start + 1), hdr);
+    write_all(fd, data + start, (size_t)(end - start + 1));
+    if (code_out) *code_out = 206;
+    return 1;
+}
+
+static int serve_static(int fd, const char *rawpath, const char *range)
 {
     char path[1024], full[1200];
     size_t len = 0;
     char *data;
     const char *cache;
+    const char *ctype;
 
     if (strlen(rawpath) >= sizeof path) {
         send_text(fd, 414, "414 URI Too Long");
@@ -550,7 +607,21 @@ static int serve_static(int fd, const char *rawpath)
     else
         cache = "Cache-Control: public, max-age=3600\r\n";
 
-    send_body(fd, 200, mime_of(full), data, len, cache);
+    ctype = mime_of(full);
+
+    {
+        int rcode = 200;
+        if (serve_range(fd, ctype, data, len, range, cache, &rcode)) {
+            free(data);
+            return rcode;
+        }
+    }
+
+    {
+        char extra[160];
+        snprintf(extra, sizeof extra, "Accept-Ranges: bytes\r\n%s", cache);
+        send_body(fd, 200, ctype, data, len, extra);
+    }
     free(data);
     return 200;
 }
@@ -1023,7 +1094,7 @@ static void handle(int fd, req_t *r, const char *ip)
     }
 
     {
-        int code = serve_static(fd, r->path);
+        int code = serve_static(fd, r->path, r->range);
         access_log(ip, r->method, r->path, code);
     }
 }
