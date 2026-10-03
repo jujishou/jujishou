@@ -88,9 +88,7 @@ function rateList(pool) {
 
 /* ---------- 存档 ---------- */
 const SAVE_KEY = 'starfall-gacha-v2';
-const ADMIN_HASH = '2b46f9829d5fa6054d5ff43a2c150ddf8f2f1ff55348f61fd16db878c03fa3aa';
 const ADMIN_SESSION = 'starfall-admin-session';
-const ADMIN_REMEMBER = 'starfall-admin-remember';
 
 function blankPool() {
   return { pulls: 0, pityUR: 0, pitySR: 0, got: {} };
@@ -110,13 +108,10 @@ function blank() {
   };
 }
 
-function load() {
+function parseSave(d) {
   const s = blank();
+  if (!d || typeof d !== 'object') return s;
   try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return s;
-    const d = JSON.parse(raw);
-    if (!d || typeof d !== 'object') return s;
     s.total = Number(d.total) || 0;
     s.muted = !!d.muted;
     s.counts = (d.counts && typeof d.counts === 'object') ? d.counts : {};
@@ -134,8 +129,82 @@ function load() {
   return s;
 }
 
+function load() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return blank();
+    return parseSave(JSON.parse(raw));
+  } catch (e) { return blank(); }
+}
+
+/* ---------- 服务端存档同步 ---------- */
+let pushTimer = null;
+
+function pushSave() {
+  pushTimer = null;
+  try {
+    fetch('api/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify(state)
+    }).catch(function () { /* 离线就只留本地 */ });
+  } catch (e) { /* 忽略 */ }
+}
+
 function save() {
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(state)); } catch (e) { /* 隐私模式忽略 */ }
+  if (pushTimer) clearTimeout(pushTimer);
+  pushTimer = setTimeout(pushSave, 1500);
+}
+
+/* 探测服务端。静态托管（比如 GitHub Pages）上没有后端，
+   这时把后台入口藏掉，免得点进去只看到一堆请求失败。 */
+function probeServer() {
+  try {
+    return fetch('api/health', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        serverOnline = !!(d && d.ok);
+        const btn = $('adminBtn');
+        if (btn && !serverOnline) {
+          btn.hidden = true;
+          btn.style.display = 'none';
+        }
+        return serverOnline;
+      })
+      .catch(function () {
+        serverOnline = false;
+        const btn = $('adminBtn');
+        if (btn) { btn.hidden = true; btn.style.display = 'none'; }
+        return false;
+      });
+  } catch (e) { return Promise.resolve(false); }
+}
+
+/* 启动时若本地无进度，则认领服务端那份（换设备也能接着抽）。
+   本地已有进度时以本地为准，避免旧存档把新进度盖掉。 */
+function syncFromServer() {
+  try {
+    fetch('api/save', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !d.ok || !d.save) return;
+        if (state.total > 0) return;
+        const s = parseSave(d.save);
+        if (s.total <= 0) return;
+        state.total = s.total;
+        state.muted = s.muted;
+        state.counts = s.counts;
+        state.history = s.history;
+        state.current = s.current;
+        state.pools = s.pools;
+        try { localStorage.setItem(SAVE_KEY, JSON.stringify(state)); } catch (e) {}
+        renderAll();
+      })
+      .catch(function () {});
+  } catch (e) { /* 忽略 */ }
 }
 
 const state = load();
@@ -478,44 +547,92 @@ document.addEventListener('keydown', function (e) {
 });
 
 /* ===================== 后台 ===================== */
+
+/* 纯 JS SHA-256。
+   本站跑在 http 上（不是安全上下文），浏览器不提供 crypto.subtle，
+   所以自带一份实现：用户输入的密钥只在本机算成摘要后才离开浏览器。 */
 function sha256hex(text) {
-  if (!(window.crypto && window.crypto.subtle)) {
-    return Promise.reject(new Error('当前环境不支持 Web Crypto（需要 HTTPS 或 localhost）'));
+  function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+  var K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+           0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+           0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+           0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+           0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+           0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+           0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+           0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  var H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  var bytes = [], i, c;
+
+  for (i = 0; i < text.length; i++) {
+    c = text.charCodeAt(i);
+    if (c < 0x80) bytes.push(c);
+    else if (c < 0x800) { bytes.push(0xc0 | (c >> 6), 0x80 | (c & 63)); }
+    else { bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63)); }
   }
-  const data = new TextEncoder().encode(text);
-  return window.crypto.subtle.digest('SHA-256', data).then(function (buf) {
-    return Array.prototype.map.call(new Uint8Array(buf), function (b) {
-      return b.toString(16).padStart(2, '0');
-    }).join('');
+
+  var bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  var hi = Math.floor(bitLen / 4294967296), lo = bitLen >>> 0;
+  bytes.push((hi >>> 24) & 255, (hi >>> 16) & 255, (hi >>> 8) & 255, hi & 255);
+  bytes.push((lo >>> 24) & 255, (lo >>> 16) & 255, (lo >>> 8) & 255, lo & 255);
+
+  var w = new Array(64);
+  for (var off = 0; off < bytes.length; off += 64) {
+    for (i = 0; i < 16; i++)
+      w[i] = (bytes[off+i*4] << 24) | (bytes[off+i*4+1] << 16) | (bytes[off+i*4+2] << 8) | bytes[off+i*4+3];
+    for (i = 16; i < 64; i++) {
+      var s0 = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >>> 3);
+      var s1 = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >>> 10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) | 0;
+    }
+    var a=H[0],b=H[1],cc=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for (i = 0; i < 64; i++) {
+      var S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25);
+      var ch = (e & f) ^ (~e & g);
+      var t1 = (h + S1 + ch + K[i] + w[i]) | 0;
+      var S0 = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22);
+      var maj = (a & b) ^ (a & cc) ^ (b & cc);
+      var t2 = (S0 + maj) | 0;
+      h=g; g=f; f=e; e=(d+t1)|0; d=cc; cc=b; b=a; a=(t1+t2)|0;
+    }
+    H[0]=(H[0]+a)|0;  H[1]=(H[1]+b)|0;  H[2]=(H[2]+cc)|0; H[3]=(H[3]+d)|0;
+    H[4]=(H[4]+e)|0;  H[5]=(H[5]+f)|0;  H[6]=(H[6]+g)|0;  H[7]=(H[7]+h)|0;
+  }
+  return H.map(function (x) { return ('00000000' + (x >>> 0).toString(16)).slice(-8); }).join('');
+}
+
+/* --- 与服务端通信 --- */
+function api(path, opts) {
+  opts = opts || {};
+  return fetch(path, {
+    method: opts.method || 'GET',
+    headers: opts.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {},
+    body: opts.body || null,
+    credentials: 'same-origin',
+    cache: 'no-store'
+  }).then(function (res) {
+    return res.text().then(function (txt) {
+      var data = null;
+      try { data = JSON.parse(txt); } catch (e) { data = null; }
+      return { status: res.status, ok: res.ok, data: data, text: txt };
+    });
   });
 }
 
+/* 前端只记「我登录过」，真正的门在服务端：
+   没有服务端签发的 HttpOnly Cookie，所有 /api/admin/* 一律 401。 */
 function isUnlocked() {
-  try {
-    return sessionStorage.getItem(ADMIN_SESSION) === '1'
-        || localStorage.getItem(ADMIN_REMEMBER) === ADMIN_HASH;
-  } catch (e) { return false; }
+  try { return sessionStorage.getItem(ADMIN_SESSION) === '1'; } catch (e) { return false; }
 }
-
-function unlock(remember) {
-  try {
-    sessionStorage.setItem(ADMIN_SESSION, '1');
-    if (remember) localStorage.setItem(ADMIN_REMEMBER, ADMIN_HASH);
-  } catch (e) { /* 忽略 */ }
-}
-
-function lockAdmin() {
-  try {
-    sessionStorage.removeItem(ADMIN_SESSION);
-    localStorage.removeItem(ADMIN_REMEMBER);
-  } catch (e) { /* 忽略 */ }
-}
+function unlock() { try { sessionStorage.setItem(ADMIN_SESSION, '1'); } catch (e) {} }
+function lockAdmin() { try { sessionStorage.removeItem(ADMIN_SESSION); } catch (e) {} }
 
 function openAdmin() {
   modalEl.hidden = false;
   renderAdmin();
 }
-
 function closeAdmin() {
   modalEl.hidden = true;
   stopAdminTimer();
@@ -523,64 +640,63 @@ function closeAdmin() {
 
 /* --- 后台界面 --- */
 function renderAdmin() {
-  if (!isUnlocked()) {
-    renderGate();
-    return;
-  }
+  if (!isUnlocked()) { renderGate(); return; }
+
   adminTitleEl.textContent = '后台控制台';
   adminBodyEl.innerHTML =
     '<div class="sect">' +
-      '<h3>数据总览（自动刷新）</h3>' +
+      '<h3>服务器状态<span id="aDot" class="dot">检测中…</span></h3>' +
       '<div class="kv" id="adminLive"></div>' +
     '</div>' +
     '<div class="sect">' +
-      '<h3>卡池明细</h3>' +
-      '<div class="kv" id="adminPools"></div>' +
+      '<h3>玩家存档</h3>' +
+      '<div id="adminPlayers" class="plist"></div>' +
     '</div>' +
     '<div class="sect">' +
-      '<h3>存档管理</h3>' +
+      '<h3>审计日志</h3>' +
+      '<pre class="code code-block" id="adminLogs">读取中…</pre>' +
+    '</div>' +
+    '<div class="sect">' +
+      '<h3>本机存档</h3>' +
       '<div class="arow">' +
         '<button class="btn-sm" id="aExport">导出存档 JSON</button>' +
         '<button class="btn-sm" id="aImport">导入存档</button>' +
         '<button class="btn-sm" id="aResetPity">重置本池保底</button>' +
-        '<button class="btn-sm danger" id="aClear">清空全部数据</button>' +
+        '<button class="btn-sm danger" id="aClear">清空本机数据</button>' +
       '</div>' +
       '<input type="file" id="aFile" accept=".json,application/json" hidden>' +
       '<p class="msg" id="aMsg"></p>' +
     '</div>' +
     '<div class="sect">' +
-      '<h3>密钥工具</h3>' +
-      '<div class="arow"><button class="btn-sm" id="aKey">生成一枚新密钥</button></div>' +
-      '<div id="aKeyOut"></div>' +
-      '<p class="note">新密钥生成后，把它的 SHA-256 写进 <code>app.js</code> 的 <code>ADMIN_HASH</code> 即可启用；本页不修改代码，只给出哈希。</p>' +
-    '</div>' +
-    '<div class="sect">' +
-      '<h3>原始存档</h3>' +
-      '<code class="code" id="adminRaw"></code>' +
+      '<h3>本机原始存档</h3>' +
+      '<code class="code code-block" id="adminRaw"></code>' +
     '</div>' +
     '<div class="sect">' +
       '<div class="arow"><button class="btn-sm danger" id="aLock">退出后台</button></div>' +
-      '<p class="warn">这是纯前端后台：站点是静态页，没有服务器，所以它只能读写「当前这台设备浏览器里」的存档，无法汇总其他访客的数据。密钥校验也在本地，懂技术的人翻源码可以绕过——它挡的是随手点进来的人，不是攻击者。</p>' +
+      '<p class="note">本后台由服务器校验：密钥经 PBKDF2-SHA256（12 万轮）加盐存储，服务端只比对摘要，' +
+      '会话是 HMAC 签名的 HttpOnly Cookie。密钥明文不会存进任何文件，也不随请求上传——' +
+      '浏览器先在本机把它算成 SHA-256 摘要再发送。</p>' +
     '</div>';
 
   $('aExport').addEventListener('click', exportSave);
   $('aImport').addEventListener('click', function () { $('aFile').click(); });
   $('aFile').addEventListener('change', importSave);
   $('aResetPity').addEventListener('click', function () {
-    const ps = poolState(currentPool());
+    var ps = poolState(currentPool());
     ps.pityUR = 0; ps.pitySR = 0;
     save(); renderAll();
     adminMsg('已重置「' + currentPool().name + '」的保底进度', 'good');
   });
   $('aClear').addEventListener('click', function () {
-    if (!confirm('确定要清空全部数据吗？此操作不可撤销。')) return;
+    if (!confirm('确定要清空本机数据吗？此操作不可撤销。')) return;
     Object.assign(state, blank());
     save(); renderAll();
-    adminMsg('已清空全部数据', 'good');
+    adminMsg('已清空本机数据', 'good');
   });
-  $('aKey').addEventListener('click', generateKey);
   $('aLock').addEventListener('click', function () {
-    lockAdmin(); closeAdmin(); renderAll();
+    api('/api/logout', { method: 'POST', body: '' }).then(function () {
+      lockAdmin(); closeAdmin(); renderAll();
+    });
   });
 
   refreshAdminLive();
@@ -590,13 +706,13 @@ function renderAdmin() {
 function renderGate() {
   adminTitleEl.textContent = '后台入口';
   adminBodyEl.innerHTML =
-    '<p class="note">请输入专属密钥。密钥由管理员生成，只在获取后可见。</p>' +
+    '<p class="note">请输入专属密钥。校验在服务器上进行，错误尝试会被限速。</p>' +
     '<div class="field" style="margin-top:12px">' +
       '<input type="password" id="aKeyInput" placeholder="DSH-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false">' +
       '<button class="btn-sm" id="aKeyGo">进入后台</button>' +
     '</div>' +
     '<p class="msg" id="aMsg"></p>' +
-    '<p class="note">输入后按回车也可以直接进入。</p>';
+    '<p class="note">输入后按回车也可以直接进入。密钥明文只在本机算成摘要，不会原样发出。</p>';
   $('aKeyGo').addEventListener('click', tryUnlock);
   $('aKeyInput').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') tryUnlock();
@@ -604,84 +720,111 @@ function renderGate() {
 }
 
 function adminMsg(text, cls) {
-  const el = $('aMsg');
+  var el = $('aMsg');
   if (!el) return;
   el.textContent = text || '';
   el.className = 'msg ' + (cls || '');
 }
 
 function tryUnlock() {
-  const input = $('aKeyInput');
-  const raw = (input && input.value || '').trim().toUpperCase();
+  var input = $('aKeyInput');
+  var raw = (input && input.value || '').trim().toUpperCase();
   if (!raw) { adminMsg('请输入密钥', 'bad'); return; }
   adminMsg('校验中…', '');
-  sha256hex(raw).then(function (hex) {
-    if (hex === ADMIN_HASH) {
-      unlock(true);
-      adminMsg('密钥正确，正在进入…', 'good');
-      setTimeout(function () {
-        renderAdmin();
-        startAdminTimer();
-      }, 320);
-    } else {
-      adminMsg('密钥不正确', 'bad');
-    }
-  }).catch(function (err) {
-    adminMsg(err.message || '校验失败', 'bad');
-  });
+  var cred = sha256hex(raw);
+  api('/api/login', { method: 'POST', body: 'key=' + encodeURIComponent(cred) })
+    .then(function (r) {
+      if (r.ok && r.data && r.data.ok) {
+        unlock();
+        adminMsg('密钥正确，正在进入…', 'good');
+        setTimeout(function () { renderAdmin(); }, 320);
+      } else if (r.status === 429) {
+        adminMsg('尝试次数过多，请等几分钟再试', 'bad');
+      } else {
+        adminMsg('密钥不正确', 'bad');
+      }
+    })
+    .catch(function () { adminMsg('无法连接服务器', 'bad'); });
+}
+
+function fmtTime(sec) {
+  var d = new Date(sec * 1000);
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' +
+         p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
 function refreshAdminLive() {
   if (!modalEl || modalEl.hidden || !isUnlocked()) return;
-  const live = $('adminLive');
-  const pools = $('adminPools');
-  const raw = $('adminRaw');
-  if (!live) return;
 
-  const all = {};
-  TIER_ORDER.forEach(function (t) { all[t] = 0; });
-  let pulls = 0;
-  POOLS.forEach(function (p) {
-    const ps = poolState(p);
-    pulls += ps.pulls;
-    TIER_ORDER.forEach(function (t) { all[t] += (ps.got[t] || 0); });
+  api('/api/admin/overview').then(function (r) {
+    var dot = $('aDot'), live = $('adminLive');
+    if (!dot || !live) return;
+    if (r.status === 401) {
+      dot.className = 'dot bad'; dot.textContent = '会话已失效';
+      lockAdmin(); renderGate();
+      adminMsg('登录已过期，请重新输入密钥', 'bad');
+      return;
+    }
+    if (!r.ok || !r.data || !r.data.ok) { dot.className = 'dot bad'; dot.textContent = '异常'; return; }
+    dot.className = 'dot good'; dot.textContent = '在线';
+    live.innerHTML =
+      '<div><b>' + r.data.players + '</b><span>玩家存档</span></div>' +
+      '<div><b>' + r.data.pulls + '</b><span>记录总抽数</span></div>' +
+      '<div><b>' + (r.data.bytes / 1024).toFixed(1) + ' KB</b><span>占用空间</span></div>' +
+      '<div><b>' + r.data.port + '</b><span>服务端口</span></div>' +
+      '<div><b>' + fmtTime(r.data.serverTime) + '</b><span>服务器时间</span></div>';
+  }).catch(function () {
+    var dot = $('aDot');
+    if (dot) { dot.className = 'dot bad'; dot.textContent = '离线'; }
   });
-  const rate = pulls ? ((all.UR / pulls) * 100).toFixed(2) + '%' : '—';
 
-  live.innerHTML =
-    '<div><b>' + pulls + '</b><span>总抽数</span></div>' +
-    '<div class="ur"><b>' + all.UR + '</b><span>大隐藏</span></div>' +
-    '<div class="sr"><b>' + all.SR + '</b><span>SR 出货</span></div>' +
-    '<div><b>' + all.R + '</b><span>R 出货</span></div>' +
-    '<div class="ur"><b>' + rate + '</b><span>综合出金率</span></div>' +
-    '<div><b>' + state.history.length + '</b><span>记录条数</span></div>';
-
-  if (pools) {
-    pools.innerHTML = POOLS.map(function (p) {
-      const ps = poolState(p);
-      const cur = p.id === state.current ? '（当前）' : '';
-      return '<div><b>' + ps.pulls + '</b><span>' + p.name + cur + '<br>保底 ' + ps.pityUR + '/' + p.pityUR +
-        ' · 大隐藏 ×' + (ps.got.UR || 0) + '</span></div>';
+  api('/api/admin/saves').then(function (r) {
+    var box = $('adminPlayers');
+    if (!box || !r.data || !r.data.ok) return;
+    if (!r.data.players.length) { box.innerHTML = '<p class="note">还没有任何玩家存档。</p>'; return; }
+    box.innerHTML = r.data.players.map(function (p) {
+      var pulls = '—', ur = '—';
+      try {
+        var sv = JSON.parse(p.raw);
+        pulls = sv.total || 0;
+        var n = 0;
+        if (sv.pools) Object.keys(sv.pools).forEach(function (k) { n += (sv.pools[k].got && sv.pools[k].got.UR) || 0; });
+        ur = n;
+      } catch (e) {}
+      return '<details class="pitem"><summary><b>' + p.id.slice(0, 12) + '…</b>' +
+             '<span>' + pulls + ' 抽 · 大隐藏 ×' + ur + ' · ' + p.bytes + 'B</span></summary>' +
+             '<pre class="code code-block">' + p.raw.replace(/[<>&]/g, function (c) {
+               return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c];
+             }) + '</pre></details>';
     }).join('');
-  }
+  }).catch(function () {});
+
+  api('/api/admin/logs').then(function (r) {
+    var box = $('adminLogs');
+    if (!box || !r.data || !r.data.ok) return;
+    box.textContent = r.data.logs.length ? r.data.logs.join('\n') : '（暂无日志）';
+  }).catch(function () {});
+
+  var raw = $('adminRaw');
   if (raw) raw.textContent = JSON.stringify(state, null, 2);
 }
 
-let adminTimer = null;
+var adminTimer = null;
 function startAdminTimer() {
   stopAdminTimer();
-  adminTimer = setInterval(refreshAdminLive, 1000);
+  adminTimer = setInterval(refreshAdminLive, 5000);
 }
 function stopAdminTimer() {
   if (adminTimer) { clearInterval(adminTimer); adminTimer = null; }
 }
 
 function exportSave() {
-  const text = JSON.stringify(state, null, 2);
-  const blob = new Blob([text], { type: 'application/json' });
-  const a = document.createElement('a');
+  var text = JSON.stringify(state, null, 2);
+  var blob = new Blob([text], { type: 'application/json' });
+  var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = '星海抽卡-存档-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
+  a.download = 'Jujishou测试-存档-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -690,15 +833,14 @@ function exportSave() {
 }
 
 function importSave(e) {
-  const file = e.target.files && e.target.files[0];
+  var file = e.target.files && e.target.files[0];
   if (!file) return;
-  const reader = new FileReader();
+  var reader = new FileReader();
   reader.onload = function () {
     try {
-      const d = JSON.parse(String(reader.result));
+      var d = JSON.parse(String(reader.result));
       if (!d || typeof d !== 'object' || !d.pools) throw new Error('文件格式不对');
-      try { localStorage.setItem(SAVE_KEY, JSON.stringify(d)); } catch (err) { /* 忽略 */ }
-      Object.assign(state, load());
+      Object.assign(state, d);
       save(); renderAll();
       adminMsg('导入成功，数据已刷新', 'good');
     } catch (err) {
@@ -707,31 +849,6 @@ function importSave(e) {
   };
   reader.readAsText(file);
   e.target.value = '';
-}
-
-function generateKey() {
-  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const g = function () {
-    let s = '';
-    const arr = new Uint32Array(4);
-    if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(arr);
-    for (let i = 0; i < 4; i++) {
-      const v = arr[i] || Math.floor(Math.random() * 4294967296);
-      s += A[v % A.length];
-    }
-    return s;
-  };
-  const key = 'DSH-' + g() + '-' + g() + '-' + g();
-  const out = $('aKeyOut');
-  sha256hex(key).then(function (hex) {
-    out.innerHTML =
-      '<div class="keybox">' + key + '</div>' +
-      '<p class="note">这一串只显示这一次，请立刻复制保存。</p>' +
-      '<p class="note">它的 SHA-256（写进 app.js 的 ADMIN_HASH）：</p>' +
-      '<code class="code">' + hex + '</code>';
-  }).catch(function (err) {
-    out.innerHTML = '<p class="msg bad">' + (err.message || '生成失败') + '</p>';
-  });
 }
 
 /* ---------- 后台入口绑定 ---------- */
@@ -745,4 +862,7 @@ document.addEventListener('keydown', function (e) {
 });
 
 /* ---------- 启动 ---------- */
+let serverOnline = false;
 renderAll();
+probeServer();
+syncFromServer();
