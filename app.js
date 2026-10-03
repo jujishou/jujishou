@@ -1820,6 +1820,23 @@ document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && !modalEl.hidden) closeAdmin();
 });
 
+/* ---------- 手机输入法卡顿治理 ----------
+   输入框一获得焦点就给 body 挂 .typing，CSS 会把背景星空、卡片动画、
+   h1 的 drop-shadow 和各处 backdrop-filter 全停掉；失焦再恢复。
+   手机上弹出输入法时帧率掉成个位数，主要就是这些东西每帧重算模糊。 */
+document.addEventListener('focusin', function (e) {
+  var t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) {
+    document.body.classList.add('typing');
+  }
+});
+document.addEventListener('focusout', function (e) {
+  var t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) {
+    document.body.classList.remove('typing');
+  }
+});
+
 /* ---------- 启动 ---------- */
 let serverOnline = false;
 renderAll();

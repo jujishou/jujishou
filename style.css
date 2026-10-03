@@ -873,7 +873,10 @@ code.code { background: rgba(4, 6, 18, .9); padding: 10px 12px; }
   padding: 20px;
   background: radial-gradient(circle at 50% 30%, #1b2340 0%, #0a0d18 62%, #05070d 100%);
   overflow-y: auto;
+  overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+  /* 独立合成层：弹出输入法引发的重排不牵连底下的页面 */
+  transform: translateZ(0);
 }
 .gate[hidden] { display: none; }
 
@@ -883,12 +886,14 @@ code.code { background: rgba(4, 6, 18, .9); padding: 10px 12px; }
   margin: auto;
   padding: 26px 22px 22px;
   border-radius: 18px;
-  background: rgba(20, 26, 44, 0.82);
+  /* 这里原来有 backdrop-filter: blur(10px)。手机弹出输入法时视口变化，
+     浏览器每帧都要把卡片背后的内容重新模糊一遍（背后还有 70 颗一直闪的星星），
+     直接卡死。去掉模糊、把底色做实，观感几乎一样但便宜太多。 */
+  background: rgba(18, 23, 40, 0.97);
   border: 1px solid rgba(130, 160, 255, 0.22);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
   box-sizing: border-box;
+  transform: translateZ(0);
 }
 
 .gate-title {
@@ -983,6 +988,31 @@ code.code { background: rgba(4, 6, 18, .9); padding: 10px 12px; }
 
 /* 门禁开着的时候，把主页面的滚动也按住 */
 body.gated { overflow: hidden; }
+
+/* ---------- 手机输入法的卡顿治理 ----------
+   规律：只要页面上有持续动画 + backdrop-filter，弹出输入法时每帧都要重新采样
+   模糊，帧率直接掉到个位数。所以「门禁开着」或「正在打字」时，把这些开销全关掉。
+   （门禁是全屏的，用户根本看不到星空，关掉零损失。） */
+body.gated .sky,
+body.typing .sky { display: none; }
+
+body.gated .card,
+body.typing .card { animation: none; }
+
+/* h1 用了 background-clip:text + drop-shadow，打字时也是重绘大户 */
+body.typing h1 { filter: none; }
+
+body.gated .banner,
+body.gated .modal,
+body.typing .banner,
+body.typing .modal {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* 输入框本身也提成独立层，避免光标闪烁引起整块重绘 */
+.gate-form input,
+.modal input { transform: translateZ(0); }
 
 /* 底栏显示当前账号 */
 .who {
