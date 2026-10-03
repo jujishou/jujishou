@@ -2,7 +2,10 @@
 
 零依赖的浏览器抽卡小游戏：纯静态 HTML / CSS / JS，没有构建步骤、没有 npm、没有框架。
 
-线上地址：<https://jujishou.github.io/jujishou/>
+线上地址：**<https://jujishou.dpdns.org>**（账号系统、存档、后台都在这台上，HTTP 自动跳 HTTPS）
+
+另有两条备用地址（纯静态、没有后端，账号功能自动跳过）：
+<https://jujishou.github.io/jujishou/>、`http://120.220.76.234:8880/`
 
 ## 两个卡池
 
@@ -112,6 +115,20 @@ UR 卡在第一次获得之前，卡面显示成灰度 + `???`。首次抽到之
 | 密钥校验 | —— | 服务端 PBKDF2(120000 轮)，前端改不动 |
 | 存档 | 只在本机 `localStorage` | 服务端 `saves/<uid>.json`，跟着账号走，换设备自动认领 |
 | 审计 | 无 | 有，落 `access.log` |
+
+## 两种部署形态
+
+仓库里现在有两套后端，前端完全共用：
+
+| | Cloudflare Workers（**现在用的**） | C 版（云服务器） |
+| --- | --- | --- |
+| 地址 | <https://jujishou.dpdns.org> | `http://120.220.76.234:8880/` |
+| 源码 | `cf/`（`wrangler.toml` + `schema.sql` + `src/worker.js`） | `server/`（`server.c` 等） |
+| 存储 | D1 数据库 | 服务器上的 JSON 文件 |
+| HTTPS | 有（Cloudflare 证书） | 没有 |
+| 为什么换 | 机房只放行「过白」域名，`dpdns.org` 这种免费域名备不了案，域名在那边用不了 | —— |
+
+细节见 [`cf/README.md`](cf/README.md)。C 版仍然留着、也还能跑，当备份用。
 
 ## 服务端
 

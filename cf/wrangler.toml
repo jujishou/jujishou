@@ -1,0 +1,27 @@
+name = "jujishou-gacha"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# 静态站点（index.html / app.js / style.css / art/）直接由 Cloudflare 资源服务器出，
+# 只有不存在的路径才会进 Worker，也就是 /api/*。
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# 自定义域名：Cloudflare 会自动建好 DNS 记录和证书。
+# （workers.dev 在国内被 DNS 污染，必须走自己的域名）
+routes = [
+  { pattern = "jujishou.dpdns.org", custom_domain = true }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "gacha"
+database_id = "03e64927-c25d-4296-a942-abec4a0062b4"
+
+[vars]
+ADMIN_NAME = "root"
+
+# 密钥（用 wrangler secret put 写入，不写进仓库）：
+#   SESSION_SECRET  会话 Cookie 的 HMAC 密钥
+#   ADMIN_HASH      管理员密钥的 sha256（前端也是先 sha256 再发的）
