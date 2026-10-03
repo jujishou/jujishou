@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>星海抽卡 · Starfall Gacha</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="sky" id="sky"></div>
+<div class="flash" id="flash"></div>
+
+<header>
+  <h1>星海抽卡</h1>
+  <p class="sub">STARFALL&nbsp;GACHA</p>
+</header>
+
+<main>
+  <section class="banner">
+    <div class="rates">
+      <span class="rate ssr">SSR 0.6%</span>
+      <span class="rate sr">SR 5.1%</span>
+      <span class="rate r">R 94.3%</span>
+    </div>
+    <div class="pity">
+      <div class="pity-text">
+        <span>大保底进度</span>
+        <span id="pityLabel">0 / 90</span>
+      </div>
+      <div class="pity-bar"><i id="pityFill"></i></div>
+      <div class="pity-text small">
+        <span>十连保底 SR</span>
+        <span id="pity4Label">0 / 10</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="stage" id="stage">
+    <p class="hint">点击下方按钮，召唤属于你的星灵 ✦</p>
+  </section>
+
+  <section class="controls">
+    <button class="btn primary" id="pull1">
+      <b>单抽</b><small>×1</small>
+    </button>
+    <button class="btn gold" id="pull10">
+      <b>十连</b><small>×10</small>
+    </button>
+  </section>
+
+  <section class="stats" id="stats"></section>
+
+  <section class="log-wrap">
+    <div class="log-head">
+      <h2>抽卡记录</h2>
+      <div class="log-actions">
+        <button class="mini" id="muteBtn" title="音效开关">🔊</button>
+        <button class="mini danger" id="resetBtn">重置</button>
+      </div>
+    </div>
+    <ul class="log" id="log"></ul>
+  </section>
+</main>
+
+<footer>本地存档 · 刷新不丢 · 仅供娱乐，无任何真实消费</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
