@@ -54,6 +54,17 @@ GACHA_PORT=8080 GACHA_WWW=/opt/gacha/www GACHA_DATA=/opt/gacha/data ./gachad
 | `access.log` | 审计日志：`<时间> <IP> <方法> <路径> <状态码>` |
 | `fails.log` | 登录失败记录，用于限速 |
 
+## 两种 Cookie
+
+| Cookie | 给谁 | 有效期 | 属性 |
+| --- | --- | --- | --- |
+| `gsid` | 管理员 | `SESS_TTL` = 7 天 | `HttpOnly; SameSite=Strict` |
+| `guid` | 玩家 | `USER_TTL` = **365 天** | `HttpOnly; SameSite=Lax` |
+
+玩家 Cookie 给一年，就是为了「输入过一次后就再也不用输入」。
+两者的 token 都是 `<scope>.<过期时间>.<HMAC-SHA256>`；`check_token()` 校验时按 `USER_TTL` 放宽上限，
+但管理员 token 自己签发时仍然只给 `SESS_TTL`，所以放宽不影响后台的安全性。
+
 ## 密钥为什么不直接存明文
 
 前端把用户输入的密钥先做一次 SHA-256，得到 `cred`，**只把 cred 发出去**，明文密钥从不离开浏览器。
@@ -75,19 +86,55 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 存活探测，供前端判断是否隐藏后台入口；返回 `boot`（本次启动的毫秒号） |
-| POST | `/api/login` | 表单 `key=<cred>`，成功则下发 `gsid` Cookie |
-| POST | `/api/logout` | 清除会话 |
-| GET | `/api/session` | 当前身份 |
-| GET | `/api/save` | 取自己的存档；首次访问自动签发 `gpid` |
-| POST | `/api/save` | 覆盖写入存档（JSON，≤128 KB） |
-| GET | `/api/admin/overview` | 后台：玩家数、字节数、总抽数、启动时长、端口、www / data 路径、抽得最多的玩家 |
-| GET | `/api/admin/saves` | 后台：玩家存档列表（原文档转义成 JSON 字符串） |
+| POST | `/api/login` | 管理员登录，表单 `key=<cred>`，成功则下发 `gsid` Cookie |
+| POST | `/api/logout` | 清除管理员会话 |
+| GET | `/api/session` | 当前管理员身份 |
+| POST | `/api/register` | 注册，表单 `name` / `pass` / `code`（一次性密钥），成功则下发 `guid` Cookie |
+| POST | `/api/player/login` | 玩家登录，表单 `name` / `pass`，成功则下发 `guid` Cookie |
+| POST | `/api/player/logout` | 清除玩家会话 |
+| GET | `/api/me` | 当前玩家身份：`{"ok":true,"signedIn":false}` 或 `{...,"signedIn":true,"name":...,"uid":...}` |
+| GET | `/api/save` | 取自己的存档；**未登录 401** |
+| POST | `/api/save` | 覆盖写入存档（JSON，≤128 KB）；**未登录 401** |
+| GET | `/api/admin/overview` | 后台：玩家数、字节数、总抽数、启动时长、端口、www / data 路径、抽得最多的账号 |
+| GET | `/api/admin/saves` | 后台：存档列表（原文档转义成 JSON 字符串） |
+| GET | `/api/admin/users` | 后台：账号列表 `{uid,name,created,bytes,pulls,mtime}` |
+| POST | `/api/admin/user/delete` | 后台：删账号，表单 `uid=`，连同它的存档一起删 |
+| GET | `/api/admin/invites` | 后台：一次性密钥列表 `{code,used,uid,created,usedAt}` + `fresh`（还有几枚可用） |
+| POST | `/api/admin/invite/new` | 后台：生成一枚一次性密钥，回 `{"ok":true,"code":"XXXX-XXXX-XXXX"}` |
+| POST | `/api/admin/invite/delete` | 后台：删掉一枚密钥，表单 `code=` |
 | GET | `/api/admin/logs` | 后台：最近的审计日志 |
-| POST | `/api/admin/delete` | 后台：删除某个玩家的存档，表单 `pid=<id>`；id 先过 `valid_pid()`，穿越一律 400 |
+| POST | `/api/admin/delete` | 后台：按 `pid=<id>` 删存档（账号系统之前的老接口，仍在） |
 | POST | `/api/admin/restart` | 后台：硬重启整个服务端（见下） |
 
-后台五个接口都要求 `gsid` Cookie，没有就是 401 —— 前端改不了这个事实。
-`delete` 与 `restart` 是写操作，只接受 POST，用 GET 打它们会得到 405。
+所有 `/api/admin/*` 都要求 `gsid` Cookie，没有就是 401 —— 前端改不了这个事实。
+所有写操作（`login` / `register` / `player/login` / `player/logout` / `logout` / `save` 的 POST /
+以及全部 `/api/admin/*` 的写接口）**只接受 POST**，用 GET 打它们会得到 405。
+
+### 注册的状态码
+
+| 码 | 什么情况 |
+| --- | --- |
+| 200 | 成功，已下发 `guid` |
+| 400 | 用户名非法（<2 或 >32 字节、含控制字符或怪异符号）／密码短于 6 位 |
+| 403 | 密钥不存在、已经被用过 |
+| 409 | 用户名已经被注册 |
+
+失败时**不会消耗密钥** —— 重名被拒之后那枚密钥还能给别人用。
+
+### 账号是怎么存的
+
+- 用户名先做 `user_norm()`：ASCII 转小写，其余字节原样（所以中文用户名不会被拆坏）
+- `uid` = `sha256(归一化用户名)` 的前 16 字节 → 32 个 hex，**用它当文件名**，`<data>/users/<uid>.json`
+- 密码行是 `pbkdf2$<iters>$<salt_hex>$<hash_hex>`，`PBKDF2_ITERS` = 120000；明文密码不落盘
+- `/api/save` 未登录回 `401 {"ok":false,"err":"no-account","msg":"请先注册或登录"}`
+
+### 一次性密钥
+
+- 字符集是 **Crockford Base32**：`0123456789ABCDEFGHJKMNPQRSTVWXYZ`（32 个，去掉了易混的 `I/L/O/U`）
+- 12 位随机 → 显示成 `XXXX-XXXX-XXXX`
+- 存在 `<data>/invites/<CODE>.json`：`{"code":..,"uid":..,"used":0/1,"created":..,"usedAt":..}`
+- 注册成功时 `invite_consume()` 把它标成已用并写上 `uid`；**重写文件前会先把原来的 `created` 读回来**，
+  免得被冲成 0
 
 不支持的扩展名一律 `application/octet-stream`；已认得 `.html/.css/.js/.json/.svg/.jpg/.png/.webp/.gif/.ico/.txt/.mp4/.webm/.woff2`。
 
@@ -115,11 +162,13 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
 - **会话**：`<id>.<过期时间>.<HMAC-SHA256>`，HMAC 覆盖 `"scope|id|exp"`，密钥是 `session.key`。
   签名比对用常数时间比较。后台 Cookie 是 `HttpOnly` + `SameSite=Strict`，玩家 Cookie 是 `HttpOnly` + `SameSite=Lax`。
 - **密钥**：PBKDF2-SHA256，120000 轮，32 字节随机盐。
+- **账号密码**：同一套 PBKDF2 参数（120000 轮 + 32 字节随机盐），明文不落盘；
+  用户名做大小写归一后再摘要成 `uid`，避免「Admin 和 admin 是两个人」这种坑。
 - **限速**：同一 IP 在 600 秒内失败 5 次即 429，`fails.log` 超过 512 KB 自动只保留最近 1 小时。
 - **路径穿越**：URL 先解码再检查，`..` 一律 404；已在真实服务上验证过 4 种编码变体。
 - **注入**：写入前用 `json_quick_check()` 校验括号平衡、字符串闭合、转义与深度；
   读取时用 `json_escape()` 转义成 JSON 字符串再交给前端 `JSON.parse()`，不存在拼接。
-- **越权**：玩家只能读写自己 `gpid` 对应的那份存档（文件名由服务端签发，不接受客户端指定）。
+- **越权**：玩家只能读写自己 `guid` 对应的那份存档（文件名是用户名摘要，由服务端自己算，不接受客户端指定）。
 - **稳健性**：每个连接 `fork()` 一个子进程并 `alarm(25)`；请求头上限 16 KB、请求体上限 256 KB；
   写入用「临时文件 + rename + fsync」，中途断电不会留半个文件。
   不支持 `Transfer-Encoding: chunked`，见到就直接 400；没有 `Content-Length` 的 POST 按空 body 处理。
@@ -134,7 +183,11 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
 
 - **没有 HTTPS**。老系统上装 TLS 成本高，且当前用 IP 访问没有证书可用。
   在 HTTP 下，会话 Cookie 与登录凭证都可能被链路上的人看到。想真正安全，需要域名 + 证书 + 反向代理。
-- 会话密钥与密钥记录以文件形式存在同一台机器上，拿到 root 的人可以冒充任何玩家。
+- 会话密钥与密钥记录以文件形式存在同一台机器上，拿到 root 的人可以冒充任何账号。
+- **没有找回密码**：密码忘了只能由管理员删号重建（后台账号列表里删掉，重新发密钥注册）。
+  没有邮箱、没有验证码，这是故意的 —— 内测站点不需要那套东西。
+- **没有登录失败锁定账号**，只有按 IP 的 429（600 秒内 5 次）。
+  想暴力破解一个 6 位以上、走 PBKDF2 12 万轮的密码，代价远高于这个内测站的价值。
 - 服务端不做业务校验之外的限流（比如抽卡频率），只保护认证入口。
 - **重启会踢人**：`POST /api/admin/restart` 会掐断所有在线连接（包括发起者自己那条）。
   已经抽到一半没提交的存档会丢 —— 前端是节流 1.5 秒自动同步的，正常操作下不会踩到。
@@ -143,7 +196,7 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
 ## 文件
 
 ```
-server.c    请求解析、路由、静态托管、API、会话与限速
+server.c    请求解析、路由、静态托管、API、账号 / 一次性密钥、会话与限速
 sha256.c    SHA-256 / HMAC-SHA256 / PBKDF2-SHA256，纯 C，无外部依赖
 sha256.h
 util.c      文件读写、URL 解码、JSON 转义与校验、随机数

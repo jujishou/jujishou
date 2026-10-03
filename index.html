@@ -4,9 +4,48 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Jujishou测试</title>
-<link rel="stylesheet" href="style.css?v=1f4434d637">
+<link rel="stylesheet" href="style.css?v=0adca672db">
 </head>
 <body>
+<div class="gate" id="gate" hidden>
+  <div class="gate-box">
+    <h2 class="gate-title">Jujishou 内测</h2>
+    <p class="gate-sub" id="gateSub">本站还在测试，需要一个一次性密钥才能进来</p>
+
+    <div class="gate-tabs">
+      <button class="on" id="gTabReg">注册</button>
+      <button id="gTabLogin">已有账号</button>
+    </div>
+
+    <div class="gate-form" id="gRegForm">
+      <label>一次性密钥
+        <input id="gRegCode" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false">
+      </label>
+      <label>用户名
+        <input id="gRegName" placeholder="2~32 位，中文也行" autocomplete="username" spellcheck="false">
+      </label>
+      <label>密码
+        <input id="gRegPass" type="password" placeholder="至少 6 位" autocomplete="new-password">
+      </label>
+      <button class="btn primary" id="gRegGo"><b>注册并开始</b></button>
+      <p class="gate-tip">密钥由站长发放，一枚只能用一次。注册之后这台设备一年内不用再输。</p>
+    </div>
+
+    <div class="gate-form" id="gLoginForm" hidden>
+      <label>用户名
+        <input id="gLogName" autocomplete="username" spellcheck="false">
+      </label>
+      <label>密码
+        <input id="gLogPass" type="password" autocomplete="current-password">
+      </label>
+      <button class="btn primary" id="gLogGo"><b>登录</b></button>
+      <p class="gate-tip">已经注册过的号，换设备登录不需要密钥。</p>
+    </div>
+
+    <p class="gate-msg" id="gMsg"></p>
+  </div>
+</div>
+
 <div class="sky" id="sky"></div>
 <div class="flash" id="flash"></div>
 <div class="flash ur" id="flashUR"></div>
@@ -66,7 +105,8 @@
 </main>
 
 <footer>
-  <span>本地存档 · 刷新不丢 · 仅供娱乐，无任何真实消费</span>
+  <span id="footNote">本地存档 · 刷新不丢 · 仅供娱乐，无任何真实消费</span>
+  <span class="who" id="who" hidden></span>
   <button class="mini" id="adminBtn">后台</button>
 </footer>
 
@@ -80,7 +120,7 @@
   </div>
 </div>
 
-<script src="app.js?v=1f4434d637"></script>
+<script src="app.js?v=0adca672db"></script>
 
 <!-- 大隐藏（UR）出场演出。平时 hidden，抽到了才去取视频 -->
 <div class="ultra" id="ultra" hidden>

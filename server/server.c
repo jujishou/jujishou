@@ -35,6 +35,8 @@
 #define BODY_MAX      (256 * 1024)
 #define SAVE_MAX      (128 * 1024)
 #define SESS_TTL      (7 * 24 * 3600)
+/* 玩家会话管一年：密钥/账号只输一次，之后这台设备直接进 */
+#define USER_TTL      (365LL * 24 * 3600)
 #define PBKDF2_ITERS  120000
 #define LOGIN_WINDOW  600
 #define LOGIN_MAXFAIL 5
@@ -47,6 +49,7 @@ static char       *g_argv0 = NULL;   /* argv[0]，自我重启时用来重新执
 static char        g_home[4096];     /* 程序所在目录，重启时用它找 start.sh */
 
 static char    g_saves_dir[512];
+static char    g_users_dir[512];
 static char    g_admin_file[512];
 static char    g_secret_file[512];
 static char    g_log_file[512];
@@ -342,7 +345,7 @@ static int check_token(const char *scope, const char *tok,
     *dot2 = '\0';
 
     exp = atoll(dot1 + 1);
-    if (exp <= 0 || exp > now_sec() + SESS_TTL + 300) return 0;
+    if (exp <= 0 || exp > now_sec() + USER_TTL + 300) return 0;
 
     snprintf(msg, sizeof msg, "%s|%s|%lld", scope, work, exp);
     hmac_sha256(g_secret, sizeof g_secret, (const uint8_t *)msg, strlen(msg), mac);
@@ -437,6 +440,207 @@ static int admin_key_check(const char *plain)
     ok = ct_eq(got, want, 32);
     free(c);
     return ok;
+}
+
+
+/* ---------- 账号 ---------- */
+
+/* 把明文口令做成一行可存盘记录：pbkdf2$轮数$盐$摘要 */
+static int pw_make_line(const char *plain, char *out, size_t outsz)
+{
+    uint8_t salt[32], dk[32];
+    char shex[65], dhex[65];
+
+    if (rand_bytes(salt, sizeof salt) != 0) return -1;
+    pbkdf2_sha256((const uint8_t *)plain, strlen(plain), salt, sizeof salt,
+                  PBKDF2_ITERS, dk, sizeof dk);
+    to_hex(salt, sizeof salt, shex);
+    to_hex(dk, sizeof dk, dhex);
+    snprintf(out, outsz, "pbkdf2$%d$%s$%s", PBKDF2_ITERS, shex, dhex);
+    return 0;
+}
+
+/* 用存盘记录去校验明文口令 */
+static int pw_check_line(const char *plain, const char *line)
+{
+    char buf[512];
+    char *p1, *p2, *p3, *nl;
+    uint32_t iters;
+    uint8_t salt[32], want[32], got[32];
+    int ok;
+
+    if (!line) return 0;
+    snprintf(buf, sizeof buf, "%s", line);
+    if (strncmp(buf, "pbkdf2$", 7) != 0) return 0;
+
+    p1 = buf + 7;
+    p2 = strchr(p1, '$');
+    if (!p2) return 0;
+    *p2 = '\0';
+    p3 = strchr(p2 + 1, '$');
+    if (!p3) return 0;
+    *p3 = '\0';
+
+    iters = (uint32_t)strtoul(p1, NULL, 10);
+    if (iters < 1000 || iters > 5000000) return 0;
+    if (from_hex(p2 + 1, salt, 32) != 0) return 0;
+
+    nl = strchr(p3 + 1, '\n');
+    if (nl) *nl = '\0';
+    if (from_hex(p3 + 1, want, 32) != 0) return 0;
+
+    pbkdf2_sha256((const uint8_t *)plain, strlen(plain), salt, 32, iters, got, 32);
+    ok = ct_eq(got, want, 32);
+    return ok;
+}
+
+/* 用户名归一化：ASCII 转小写，其余字节原样。用来算 uid，
+   这样 Alice 和 alice 是同一个账号，中文也不会被拆坏。 */
+static void user_norm(const char *in, char *out, size_t outsz)
+{
+    size_t i = 0;
+    while (in[i] && i + 1 < outsz) {
+        unsigned char c = (unsigned char)in[i];
+        out[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
+        i++;
+    }
+    out[i] = '\0';
+}
+
+/* 用户名：2~32 字节；ASCII 只允许字母数字下划线连字符；
+   >=0x80 的字节放行（中文、日文等 UTF-8）；控制字符一律拒。 */
+static int valid_username(const char *n)
+{
+    size_t len, i;
+    if (!n) return 0;
+    len = strlen(n);
+    if (len < 2 || len > 32) return 0;
+    for (i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)n[i];
+        if (c < 0x20 || c == 0x7f) return 0;
+        if (c < 0x80 && !(isalnum(c) || c == '_' || c == '-')) return 0;
+    }
+    return 1;
+}
+
+static int valid_password(const char *p)
+{
+    size_t len;
+    if (!p) return 0;
+    len = strlen(p);
+    return len >= 6 && len <= 128;
+}
+
+/* 用户名 → uid：sha256(归一化名字) 的前 16 字节，32 个 hex。
+   用摘要而不是原名字做文件名，省掉一整套转义问题。 */
+static void user_uid(const char *name, char *out /* >= 33 字节 */)
+{
+    char norm[128];
+    uint8_t d[32];
+    char hex[65];
+    user_norm(name, norm, sizeof norm);
+    sha256(norm, strlen(norm), d);
+    to_hex(d, 32, hex);
+    memcpy(out, hex, 32);
+    out[32] = '\0';
+}
+
+static void user_path(const char *uid, char *out, size_t outsz)
+{
+    snprintf(out, outsz, "%s/%s.json", g_users_dir, uid);
+}
+
+static int user_exists(const char *uid)
+{
+    char f[700];
+    user_path(uid, f, sizeof f);
+    return file_exists(f);
+}
+
+/* 读用户记录里的 "name" 字段；没有就返回 0 */
+static int user_read_name(const char *uid, char *out, size_t outsz)
+{
+    char f[700], *c, *p;
+    size_t len = 0;
+
+    user_path(uid, f, sizeof f);
+    c = read_file(f, &len);
+    if (!c) return 0;
+    p = strstr(c, "\"name\":\"");
+    if (!p) { free(c); return 0; }
+    p += 8;
+    {
+        size_t i = 0;
+        while (p[i] && p[i] != '"' && i + 1 < outsz) {
+            if (p[i] == '\\' && p[i + 1]) i++;      /* 跳过转义 */
+            out[i] = p[i];
+            i++;
+        }
+        out[i] = '\0';
+    }
+    free(c);
+    return out[0] != '\0';
+}
+
+/* 建账号。成功 0，并把 uid / 展示名写出去。 */
+static int user_create(const char *name, const char *pass,
+                       char *uid_out, size_t uidsz,
+                       char *name_out, size_t namesz)
+{
+    char uid[64], f[700], name_esc[256], line[512], body[900], tmp[600];
+    char *existing;
+
+    user_uid(name, uid);
+    if (user_exists(uid)) return -2;                 /* 已存在 */
+
+    if (pw_make_line(pass, line, sizeof line) != 0) return -1;
+
+    json_escape(name, strlen(name), name_esc, sizeof name_esc);
+    snprintf(body, sizeof body,
+             "{\"name\":\"%s\",\"pass\":\"%s\",\"created\":%lld}",
+             name_esc, line, now_sec());
+    user_path(uid, f, sizeof f);
+    if (write_file_atomic(f, body, strlen(body)) != 0) return -1;
+
+    snprintf(uid_out, uidsz, "%s", uid);
+    if (name_out && namesz) snprintf(name_out, namesz, "%s", name);
+    (void)tmp;
+    (void)existing;
+    return 0;
+}
+
+/* 校验账号口令。成功 0，失败 -1（账号不存在或口令不对）。 */
+static int user_auth(const char *name, const char *pass,
+                     char *uid_out, size_t uidsz)
+{
+    char uid[64], f[700];
+    size_t len = 0;
+    char *c, *p;
+    int ok = 0;
+
+    user_uid(name, uid);
+    user_path(uid, f, sizeof f);
+    c = read_file(f, &len);
+    if (!c) return -1;
+
+    p = strstr(c, "\"pass\":\"");
+    if (p) {
+        char rec[512];
+        size_t i = 0;
+        p += 8;
+        while (p[i] && p[i] != '"' && i + 1 < sizeof rec) {
+            if (p[i] == '\\' && p[i + 1]) i++;
+            rec[i] = p[i];
+            i++;
+        }
+        rec[i] = '\0';
+        ok = pw_check_line(pass, rec);
+    }
+    free(c);
+
+    if (!ok) return -1;
+    snprintf(uid_out, uidsz, "%s", uid);
+    return 0;
 }
 
 /* ---------- 登录限速 ---------- */
@@ -626,21 +830,249 @@ static int serve_static(int fd, const char *rawpath, const char *range)
     return 200;
 }
 
-/* ---------- 存档 ---------- */
-static int current_pid(const req_t *r, char *pid, size_t psz)
+
+/* ---------- 一次性邀请密钥 ---------- */
+/* 测试期入场券：每枚密钥只能拿去注册一个账号，用完即废。
+   文件名就是密钥本身（字符集里没有路径危险字符）。 */
+static void invite_path(const char *code, char *out, size_t outsz)
 {
-    char tok[512];
-    if (cookie_get(r->cookie, "gpid", tok, sizeof tok) != 0) return 0;
-    if (!check_token("pid", tok, pid, psz, NULL)) return 0;
-    if (!valid_pid(pid)) return 0;
+    snprintf(out, outsz, "%s/invites/%s.json", g_data, code);
+}
+
+static void gen_invite_code(char *out, size_t outsz)
+{
+    /* Crockford Base32：32 个字符，去掉了 I/L/O/U，不会看混。
+       之前写成 31 个字符，CS[31] 取到 '\0' 把密钥截短了。 */
+    static const char CS[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    uint8_t r[16];
+    char raw[13];
+    int i;
+
+    if (rand_bytes(r, sizeof r) != 0) { out[0] = '\0'; return; }
+    for (i = 0; i < 12; i++) raw[i] = CS[r[i] & 31];
+    raw[12] = '\0';
+    snprintf(out, outsz, "%.4s-%.4s-%.4s", raw, raw + 4, raw + 8);
+}
+
+/* 密钥合法字符：字母数字与连字符，长度固定 */
+static int valid_invite_code(const char *c)
+{
+    size_t i, n;
+    if (!c) return 0;
+    n = strlen(c);
+    if (n < 8 || n > 32) return 0;
+    for (i = 0; i < n; i++) {
+        unsigned char ch = (unsigned char)c[i];
+        if (!(isalnum(ch) || ch == '-')) return 0;
+    }
     return 1;
 }
 
+/* 密钥存在且还没被用过 */
+static int invite_is_fresh(const char *code)
+{
+    char f[700];
+    size_t len = 0;
+    char *c;
+    int fresh;
+
+    if (!valid_invite_code(code)) return 0;
+    invite_path(code, f, sizeof f);
+    c = read_file(f, &len);
+    if (!c) return 0;
+    fresh = (strstr(c, "\"used\":1") == NULL);
+    free(c);
+    return fresh;
+}
+
+/* 把密钥标记成已用，写上使用者 uid */
+static int invite_consume(const char *code, const char *uid)
+{
+    char f[700], body[512], esc[128];
+    long long created = 0;
+    size_t len = 0;
+    char *c;
+
+    json_escape(uid, strlen(uid), esc, sizeof esc);
+    invite_path(code, f, sizeof f);
+
+    /* 保留原来的签发时间，别被这次写入冲掉 */
+    c = read_file(f, &len);
+    if (c) {
+        char *p = strstr(c, "\"created\":");
+        if (p) created = atoll(p + 10);
+        free(c);
+    }
+    snprintf(body, sizeof body,
+             "{\"code\":\"%s\",\"uid\":\"%s\",\"used\":1,"
+             "\"created\":%lld,\"usedAt\":%lld}\n",
+             code, esc, created, now_sec());
+    return write_file_atomic(f, body, strlen(body));
+}
+
+static int invite_create(char *out, size_t outsz)
+{
+    char code[64], f[700], body[512];
+    int tries;
+
+    for (tries = 0; tries < 8; tries++) {
+        gen_invite_code(code, sizeof code);
+        if (!code[0]) return -1;
+        invite_path(code, f, sizeof f);
+        if (file_exists(f)) continue;                  /* 撞了就重来 */
+        snprintf(body, sizeof body,
+                 "{\"code\":\"%s\",\"uid\":\"\",\"used\":0,\"created\":%lld}\n",
+                 code, now_sec());
+        if (write_file_atomic(f, body, strlen(body)) != 0) return -1;
+        snprintf(out, outsz, "%s", code);
+        return 0;
+    }
+    return -1;
+}
+
+/* ---------- 玩家会话 ---------- */
+static int current_user(const req_t *r, char *uid, size_t usz)
+{
+    char tok[512];
+    if (cookie_get(r->cookie, "guid", tok, sizeof tok) != 0) return 0;
+    if (!check_token("user", tok, uid, usz, NULL)) return 0;
+    if (!valid_pid(uid)) return 0;
+    return 1;
+}
+
+static void send_user_cookie(int fd, const char *uid, char *hdr, size_t hdrsz)
+{
+    char tok[512];
+    make_token("user", uid, now_sec() + USER_TTL, tok, sizeof tok);
+    snprintf(hdr, hdrsz,
+             "Set-Cookie: guid=%s; Path=/; Max-Age=%lld; HttpOnly; SameSite=Lax\r\n"
+             "Cache-Control: no-store\r\n",
+             tok, (long long)USER_TTL);
+}
+
+/* 老玩家（还带着旧 gpid）注册时，把他在本机攒的存档搬进新账号 */
+static void adopt_legacy_save(const req_t *r, const char *uid)
+{
+    char tok[512], pid[128], from[700], to[700];
+    size_t len = 0;
+    char *d;
+
+    if (cookie_get(r->cookie, "gpid", tok, sizeof tok) != 0) return;
+    if (!check_token("pid", tok, pid, sizeof pid, NULL)) return;
+    if (!valid_pid(pid)) return;
+
+    snprintf(to, sizeof to, "%s/%s.json", g_saves_dir, uid);
+    if (file_exists(to)) return;                       /* 新号已有存档就别覆盖 */
+    snprintf(from, sizeof from, "%s/%s.json", g_saves_dir, pid);
+    d = read_file(from, &len);
+    if (!d) return;
+    write_file_atomic(to, d, len);
+    free(d);
+}
+
+/* POST /api/register  表单：name, pass, code */
+static int api_register(int fd, const req_t *r)
+{
+    char name[128], pass[256], code[64], uid[64], hdr[800], out[900];
+    char name_esc[400];
+    int rc;
+
+    if (form_get(r->body, r->bodylen, "name", name, sizeof name) != 0 ||
+        form_get(r->body, r->bodylen, "pass", pass, sizeof pass) != 0) {
+        send_json(fd, 400, "{\"ok\":false,\"err\":\"missing\",\"msg\":\"请填写用户名和密码\"}");
+        return 400;
+    }
+    if (form_get(r->body, r->bodylen, "code", code, sizeof code) != 0)
+        code[0] = '\0';
+
+    if (!valid_username(name)) {
+        send_json(fd, 400, "{\"ok\":false,\"err\":\"bad-name\","
+                           "\"msg\":\"用户名 2~32 位，只能用字母、数字、下划线、连字符或中文\"}");
+        return 400;
+    }
+    if (!valid_password(pass)) {
+        send_json(fd, 400, "{\"ok\":false,\"err\":\"bad-pass\","
+                           "\"msg\":\"密码至少 6 位\"}");
+        return 400;
+    }
+    if (!invite_is_fresh(code)) {
+        send_json(fd, 403, "{\"ok\":false,\"err\":\"bad-code\","
+                           "\"msg\":\"密钥无效或已经被用过了\"}");
+        return 403;
+    }
+
+    rc = user_create(name, pass, uid, sizeof uid, NULL, 0);
+    if (rc == -2) {
+        send_json(fd, 409, "{\"ok\":false,\"err\":\"taken\",\"msg\":\"这个名字已经有人用了\"}");
+        return 409;
+    }
+    if (rc != 0) {
+        send_json(fd, 500, "{\"ok\":false,\"err\":\"write\",\"msg\":\"写入失败\"}");
+        return 500;
+    }
+    invite_consume(code, uid);
+    adopt_legacy_save(r, uid);
+    send_user_cookie(fd, uid, hdr, sizeof hdr);
+
+    json_escape(name, strlen(name), name_esc, sizeof name_esc);
+    snprintf(out, sizeof out, "{\"ok\":true,\"name\":\"%s\"}", name_esc);
+    send_body(fd, 200, "application/json; charset=utf-8", out, strlen(out), hdr);
+    return 200;
+}
+
+/* POST /api/player/login  表单：name, pass */
+static int api_player_login(int fd, const req_t *r)
+{
+    char name[128], pass[256], uid[64], hdr[800], out[900], name_esc[400];
+
+    if (form_get(r->body, r->bodylen, "name", name, sizeof name) != 0 ||
+        form_get(r->body, r->bodylen, "pass", pass, sizeof pass) != 0) {
+        send_json(fd, 400, "{\"ok\":false,\"err\":\"missing\",\"msg\":\"请填写用户名和密码\"}");
+        return 400;
+    }
+    if (user_auth(name, pass, uid, sizeof uid) != 0) {
+        send_json(fd, 401, "{\"ok\":false,\"err\":\"bad-login\",\"msg\":\"用户名或密码不对\"}");
+        return 401;
+    }
+    send_user_cookie(fd, uid, hdr, sizeof hdr);
+    if (!user_read_name(uid, name_esc, sizeof name_esc))
+        snprintf(name_esc, sizeof name_esc, "%s", name);
+    {
+        char esc[400];
+        json_escape(name_esc, strlen(name_esc), esc, sizeof esc);
+        snprintf(out, sizeof out, "{\"ok\":true,\"name\":\"%s\"}", esc);
+    }
+    send_body(fd, 200, "application/json; charset=utf-8", out, strlen(out), hdr);
+    return 200;
+}
+
+/* GET /api/me —— 没登录就 ok:false，前端据此弹门禁 */
+static void api_me(int fd, const req_t *r)
+{
+    char uid[64], name[128], esc[400], out[700];
+
+    if (!current_user(r, uid, sizeof uid)) {
+        send_json(fd, 200, "{\"ok\":true,\"signedIn\":false}");
+        return;
+    }
+    if (!user_read_name(uid, name, sizeof name))
+        snprintf(name, sizeof name, "%s", uid);
+    json_escape(name, strlen(name), esc, sizeof esc);
+    snprintf(out, sizeof out, "{\"ok\":true,\"signedIn\":true,\"name\":\"%s\",\"uid\":\"%s\"}",
+             esc, uid);
+    send_json(fd, 200, out);
+}
+
+/* ---------- 存档 ---------- */
 static int api_get_save(int fd, const req_t *r)
 {
-    char pid[128], file[700], tok[512], hdr[800];
+    char pid[128], file[700];
 
-    if (current_pid(r, pid, sizeof pid)) {
+    if (!current_user(r, pid, sizeof pid)) {
+        send_json(fd, 401, "{\"ok\":false,\"err\":\"no-account\",\"msg\":\"请先注册或登录\"}");
+        return 401;
+    }
+    {
         size_t len = 0;
         char *d;
         snprintf(file, sizeof file, "%s/%s.json", g_saves_dir, pid);
@@ -657,24 +1089,6 @@ static int api_get_save(int fd, const req_t *r)
         return 200;
     }
 
-    /* 新玩家：签发 pid cookie */
-    {
-        uint8_t rnd[16];
-        char hex[33], newpid[40];
-        if (rand_bytes(rnd, sizeof rnd) != 0) {
-            send_json(fd, 500, "{\"ok\":false,\"err\":\"rand\"}");
-            return 500;
-        }
-        to_hex(rnd, sizeof rnd, hex);
-        snprintf(newpid, sizeof newpid, "p%s", hex);
-        make_token("pid", newpid, now_sec() + SESS_TTL, tok, sizeof tok);
-        snprintf(hdr, sizeof hdr,
-                 "Set-Cookie: gpid=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax\r\n"
-                 "Cache-Control: no-store\r\n",
-                 tok, SESS_TTL);
-        send_body(fd, 200, "application/json; charset=utf-8",
-                  "{\"ok\":true,\"save\":null}", 24, hdr);
-    }
     return 200;
 }
 
@@ -682,9 +1096,9 @@ static int api_put_save(int fd, const req_t *r)
 {
     char pid[128], file[700];
 
-    if (!current_pid(r, pid, sizeof pid)) {
-        send_json(fd, 403, "{\"ok\":false,\"err\":\"no-session\"}");
-        return 403;
+    if (!current_user(r, pid, sizeof pid)) {
+        send_json(fd, 401, "{\"ok\":false,\"err\":\"no-account\",\"msg\":\"请先注册或登录\"}");
+        return 401;
     }
     if (!r->body || r->bodylen == 0) {
         send_json(fd, 400, "{\"ok\":false,\"err\":\"empty\"}");
@@ -820,6 +1234,197 @@ static void api_admin_overview(int fd)
              g_start_time ? now - g_start_time : 0,
              g_www, g_data, newest_pid, max_pulls);
     send_json(fd, 200, out);
+}
+
+
+/* ---------- 后台：账号与密钥 ---------- */
+
+/* 从用户记录里抠出 created 字段 */
+static long long user_created(const char *uid)
+{
+    char f[700], *c, *p;
+    size_t len = 0;
+    long long v = 0;
+    user_path(uid, f, sizeof f);
+    c = read_file(f, &len);
+    if (!c) return 0;
+    p = strstr(c, "\"created\":");
+    if (p) v = atoll(p + 10);
+    free(c);
+    return v;
+}
+
+/* 账号列表：用户名、注册时间、存档体积、抽数、最后活动 */
+static void api_admin_users(int fd)
+{
+    DIR *dir;
+    struct dirent *de;
+    char *out;
+    size_t cap = 65536, used = 0;
+    int n = 0;
+
+    out = (char *)xmalloc(cap);
+    used += (size_t)snprintf(out + used, cap - used, "{\"ok\":true,\"users\":[");
+
+    dir = opendir(g_users_dir);
+    if (dir) {
+        while ((de = readdir(dir)) != NULL) {
+            char uid[64], name[128], esc[400], sf[700];
+            char *dot;
+            size_t nlen = strlen(de->d_name);
+            struct stat st;
+            long long bytes = 0, mtime = 0, pulls = 0;
+
+            if (de->d_name[0] == '.' || nlen < 8) continue;
+            dot = strrchr(de->d_name, '.');
+            if (!dot || strcmp(dot, ".json") != 0) continue;
+            snprintf(uid, sizeof uid, "%.*s", (int)(dot - de->d_name), de->d_name);
+
+            if (!user_read_name(uid, name, sizeof name))
+                snprintf(name, sizeof name, "%s", uid);
+            json_escape(name, strlen(name), esc, sizeof esc);
+
+            snprintf(sf, sizeof sf, "%s/%s.json", g_saves_dir, uid);
+            if (stat(sf, &st) == 0) {
+                size_t slen = 0;
+                char *sd = read_file(sf, &slen);
+                bytes = (long long)st.st_size;
+                mtime = (long long)st.st_mtime;
+                if (sd) {
+                    /* 前端存档里总抽数字段叫 total，不叫 pulls */
+                    char *pp = strstr(sd, "\"total\":");
+                    if (pp) pulls = atoll(pp + 8);
+                    free(sd);
+                }
+            }
+
+            if (n) used += (size_t)snprintf(out + used, cap - used, ",");
+            used += (size_t)snprintf(out + used, cap - used,
+                "{\"uid\":\"%s\",\"name\":\"%s\",\"created\":%lld,"
+                "\"bytes\":%lld,\"pulls\":%lld,\"mtime\":%lld}",
+                uid, esc, user_created(uid), bytes, pulls, mtime);
+            n++;
+            if (used > cap - 2048) break;
+        }
+        closedir(dir);
+    }
+    used += (size_t)snprintf(out + used, cap - used, "],\"count\":%d}", n);
+    send_json(fd, 200, out);
+    free(out);
+}
+
+static int api_admin_user_delete(int fd, const req_t *r)
+{
+    char uid[128], uf[700], sf[700];
+
+    if (form_get(r->body, r->bodylen, "uid", uid, sizeof uid) != 0 || !uid[0] ||
+        !valid_pid(uid)) {
+        send_json(fd, 400, "{\"ok\":false,\"err\":\"bad-uid\",\"msg\":\"账号标识不合法\"}");
+        return 400;
+    }
+    user_path(uid, uf, sizeof uf);
+    if (unlink(uf) != 0) {
+        send_json(fd, 404, "{\"ok\":false,\"err\":\"not-found\",\"msg\":\"账号不存在\"}");
+        return 404;
+    }
+    snprintf(sf, sizeof sf, "%s/%s.json", g_saves_dir, uid);
+    unlink(sf);
+    send_json(fd, 200, "{\"ok\":true,\"deleted\":true}");
+    return 200;
+}
+
+/* 密钥列表：默认只回还没用过的，加 all=1 连已用的也回 */
+static void api_admin_invites(int fd)
+{
+    DIR *dir;
+    struct dirent *de;
+    char idir[600];
+    char *out;
+    size_t cap = 32768, used = 0;
+    int n = 0, fresh = 0;
+
+    snprintf(idir, sizeof idir, "%s/invites", g_data);
+    out = (char *)xmalloc(cap);
+    used += (size_t)snprintf(out + used, cap - used, "{\"ok\":true,\"invites\":[");
+
+    dir = opendir(idir);
+    if (dir) {
+        while ((de = readdir(dir)) != NULL) {
+            char f[700], *c, *dot;
+            size_t len = 0, nlen = strlen(de->d_name);
+            int usedflag = 0;
+            long long created = 0, usedAt = 0;
+            char useduid[64] = "";
+
+            if (de->d_name[0] == '.' || nlen < 8) continue;
+            dot = strrchr(de->d_name, '.');
+            if (!dot || strcmp(dot, ".json") != 0) continue;
+
+            snprintf(f, sizeof f, "%s/%s", idir, de->d_name);
+            c = read_file(f, &len);
+            if (!c) continue;
+            {
+                char *p;
+                if (strstr(c, "\"used\":1")) usedflag = 1;
+                p = strstr(c, "\"created\":"); if (p) created = atoll(p + 10);
+                p = strstr(c, "\"usedAt\":");  if (p) usedAt  = atoll(p + 9);
+                p = strstr(c, "\"uid\":\"");
+                if (p) {
+                    size_t i = 0;
+                    p += 7;
+                    while (p[i] && p[i] != '"' && i + 1 < sizeof useduid) { useduid[i] = p[i]; i++; }
+                    useduid[i] = '\0';
+                }
+            }
+            free(c);
+
+            /* 没用的排前面：单独的 fresh 列表让前端好摆 */
+            if (!usedflag) fresh++;
+            if (n) used += (size_t)snprintf(out + used, cap - used, ",");
+            used += (size_t)snprintf(out + used, cap - used,
+                "{\"code\":\"%.*s\",\"used\":%d,\"uid\":\"%s\","
+                "\"created\":%lld,\"usedAt\":%lld}",
+                (int)(dot - de->d_name), de->d_name, usedflag, useduid, created, usedAt);
+            n++;
+            if (used > cap - 1024) break;
+        }
+        closedir(dir);
+    }
+    used += (size_t)snprintf(out + used, cap - used,
+                             "],\"count\":%d,\"fresh\":%d}", n, fresh);
+    send_json(fd, 200, out);
+    free(out);
+}
+
+static int api_admin_invite_new(int fd, const req_t *r)
+{
+    char code[64], out[200];
+    (void)r;
+    if (invite_create(code, sizeof code) != 0) {
+        send_json(fd, 500, "{\"ok\":false,\"err\":\"write\",\"msg\":\"生成失败\"}");
+        return 500;
+    }
+    snprintf(out, sizeof out, "{\"ok\":true,\"code\":\"%s\"}", code);
+    send_json(fd, 200, out);
+    return 200;
+}
+
+static int api_admin_invite_delete(int fd, const req_t *r)
+{
+    char code[64], f[700];
+
+    if (form_get(r->body, r->bodylen, "code", code, sizeof code) != 0 ||
+        !valid_invite_code(code)) {
+        send_json(fd, 400, "{\"ok\":false,\"err\":\"bad-code\"}");
+        return 400;
+    }
+    invite_path(code, f, sizeof f);
+    if (unlink(f) != 0) {
+        send_json(fd, 404, "{\"ok\":false,\"err\":\"not-found\"}");
+        return 404;
+    }
+    send_json(fd, 200, "{\"ok\":true,\"deleted\":true}");
+    return 200;
 }
 
 /* 删除单个玩家存档；pid 必须通过 valid_pid，杜绝路径穿越 */
@@ -1020,6 +1625,29 @@ static void handle(int fd, req_t *r, const char *ip)
         return;
     }
 
+    if (is_post && !strcmp(r->path, "/api/register")) {
+        int rc = api_register(fd, r);
+        access_log(ip, r->method, r->path, rc);
+        return;
+    }
+    if (is_post && !strcmp(r->path, "/api/player/login")) {
+        int rc = api_player_login(fd, r);
+        access_log(ip, r->method, r->path, rc);
+        return;
+    }
+    if (is_post && !strcmp(r->path, "/api/player/logout")) {
+        access_log(ip, r->method, r->path, 200);
+        send_body(fd, 200, "application/json; charset=utf-8",
+                  "{\"ok\":true}", 11,
+                  "Set-Cookie: guid=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax\r\n"
+                  "Cache-Control: no-store\r\n");
+        return;
+    }
+    if (is_get && !strcmp(r->path, "/api/me")) {
+        access_log(ip, r->method, r->path, 200);
+        api_me(fd, r);
+        return;
+    }
     if (is_post && !strcmp(r->path, "/api/logout")) {
         access_log(ip, r->method, r->path, 200);
         send_body(fd, 200, "application/json; charset=utf-8",
@@ -1054,6 +1682,11 @@ static void handle(int fd, req_t *r, const char *ip)
         !strcmp(r->path, "/api/admin/saves") ||
         !strcmp(r->path, "/api/admin/logs") ||
         !strcmp(r->path, "/api/admin/delete") ||
+        !strcmp(r->path, "/api/admin/users") ||
+        !strcmp(r->path, "/api/admin/user/delete") ||
+        !strcmp(r->path, "/api/admin/invites") ||
+        !strcmp(r->path, "/api/admin/invite/new") ||
+        !strcmp(r->path, "/api/admin/invite/delete") ||
         !strcmp(r->path, "/api/admin/restart")) {
         if (!authed) {
             access_log(ip, r->method, r->path, 401);
@@ -1062,6 +1695,9 @@ static void handle(int fd, req_t *r, const char *ip)
         }
         /* 这两个是写操作，必须是 POST */
         if (!strcmp(r->path, "/api/admin/delete") ||
+            !strcmp(r->path, "/api/admin/user/delete") ||
+            !strcmp(r->path, "/api/admin/invite/new") ||
+            !strcmp(r->path, "/api/admin/invite/delete") ||
             !strcmp(r->path, "/api/admin/restart")) {
             int code;
             if (!is_post) {
@@ -1069,14 +1705,19 @@ static void handle(int fd, req_t *r, const char *ip)
                 send_text(fd, 405, "405 Method Not Allowed");
                 return;
             }
-            if (!strcmp(r->path, "/api/admin/delete")) code = api_admin_delete(fd, r);
-            else                                       code = api_admin_restart(fd, r);
+            if (!strcmp(r->path, "/api/admin/delete"))            code = api_admin_delete(fd, r);
+            else if (!strcmp(r->path, "/api/admin/user/delete"))  code = api_admin_user_delete(fd, r);
+            else if (!strcmp(r->path, "/api/admin/invite/new"))   code = api_admin_invite_new(fd, r);
+            else if (!strcmp(r->path, "/api/admin/invite/delete")) code = api_admin_invite_delete(fd, r);
+            else                                                  code = api_admin_restart(fd, r);
             access_log(ip, r->method, r->path, code);
             return;
         }
         access_log(ip, r->method, r->path, 200);
         if (!strcmp(r->path, "/api/admin/overview")) api_admin_overview(fd);
         else if (!strcmp(r->path, "/api/admin/saves")) api_admin_saves(fd);
+        else if (!strcmp(r->path, "/api/admin/users")) api_admin_users(fd);
+        else if (!strcmp(r->path, "/api/admin/invites")) api_admin_invites(fd);
         else api_admin_logs(fd);
         return;
     }
@@ -1165,6 +1806,7 @@ int main(int argc, char **argv)
     }
 
     snprintf(g_saves_dir,  sizeof g_saves_dir,  "%s/saves",      g_data);
+    snprintf(g_users_dir,  sizeof g_users_dir,  "%s/users",      g_data);
     snprintf(g_admin_file, sizeof g_admin_file, "%s/admin.pass", g_data);
     snprintf(g_secret_file,sizeof g_secret_file,"%s/session.key",g_data);
     snprintf(g_log_file,   sizeof g_log_file,   "%s/access.log", g_data);
@@ -1183,6 +1825,12 @@ int main(int argc, char **argv)
 
     if (mkdir_p(g_data, 0750) != 0) { perror("mkdir data"); return 1; }
     if (mkdir_p(g_saves_dir, 0750) != 0) { perror("mkdir saves"); return 1; }
+    if (mkdir_p(g_users_dir, 0750) != 0) { perror("mkdir users"); return 1; }
+    {
+        char idir[600];
+        snprintf(idir, sizeof idir, "%s/invites", g_data);
+        if (mkdir_p(idir, 0750) != 0) { perror("mkdir invites"); return 1; }
+    }
     if (secret_load_or_create() != 0) { perror("secret"); return 1; }
     if (!file_exists(g_admin_file)) {
         fprintf(stderr, "警告: %s 不存在，后台无法登录。请先执行: gachad initkey <密钥>\n",

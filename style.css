@@ -861,3 +861,234 @@ code.code { background: rgba(4, 6, 18, .9); padding: 10px 12px; }
   .ultra-card  { animation-duration: .35s; }
   .ultra-sparks i { display: none; }
 }
+
+/* ---------- 内测门禁（一次性密钥 + 注册/登录） ---------- */
+.gate {
+  position: fixed;
+  inset: 0;
+  z-index: 9600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: radial-gradient(circle at 50% 30%, #1b2340 0%, #0a0d18 62%, #05070d 100%);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.gate[hidden] { display: none; }
+
+.gate-box {
+  width: 100%;
+  max-width: 380px;
+  margin: auto;
+  padding: 26px 22px 22px;
+  border-radius: 18px;
+  background: rgba(20, 26, 44, 0.82);
+  border: 1px solid rgba(130, 160, 255, 0.22);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-sizing: border-box;
+}
+
+.gate-title {
+  margin: 0 0 6px;
+  font-size: 22px;
+  letter-spacing: 0.06em;
+  text-align: center;
+  color: #eaf0ff;
+}
+.gate-sub {
+  margin: 0 0 18px;
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+  color: #93a1c4;
+}
+
+.gate-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 4px;
+  border-radius: 12px;
+  background: rgba(10, 14, 26, 0.7);
+}
+.gate-tabs button {
+  flex: 1;
+  padding: 9px 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #8e9cbe;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.18s, color 0.18s;
+}
+.gate-tabs button.on {
+  background: linear-gradient(180deg, #3a4d8f, #2a3868);
+  color: #f2f6ff;
+  box-shadow: 0 2px 10px rgba(60, 90, 200, 0.35);
+}
+
+.gate-form { display: block; }
+.gate-form[hidden] { display: none; }
+.gate-form label {
+  display: block;
+  margin-bottom: 13px;
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+  color: #8e9cbe;
+}
+.gate-form input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 12px 13px;
+  border-radius: 11px;
+  border: 1px solid rgba(130, 160, 255, 0.24);
+  background: rgba(8, 11, 22, 0.86);
+  color: #eef3ff;
+  /* 16px 以下 iOS 会自动放大页面 */
+  font-size: 16px;
+  font-family: inherit;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.gate-form input:focus {
+  border-color: rgba(120, 165, 255, 0.75);
+  box-shadow: 0 0 0 3px rgba(90, 130, 255, 0.16);
+}
+.gate-form input::placeholder { color: #5d6b8c; }
+.gate-form .btn { width: 100%; margin-top: 4px; }
+
+.gate-tip {
+  margin: 12px 0 0;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: #6f7c9c;
+}
+
+.gate-msg {
+  min-height: 18px;
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  text-align: center;
+  color: #ff9a9a;
+}
+.gate-msg.good { color: #7ee0a8; }
+
+/* 门禁开着的时候，把主页面的滚动也按住 */
+body.gated { overflow: hidden; }
+
+/* 底栏显示当前账号 */
+.who {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+  color: #8e9cbe;
+  font-size: 12px;
+}
+.who b { color: #cdd8f5; font-weight: 600; }
+.who button {
+  border: 0;
+  background: transparent;
+  color: #7d8bb0;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 2px 4px;
+  text-decoration: underline;
+}
+.who button:hover { color: #a8b6da; }
+
+/* ---------- 后台：测试密钥 / 账号列表微调 ---------- */
+.btn-sm.gold {
+  color: #ffd98a;
+  border-color: rgba(255, 210, 120, .38);
+}
+.btn-sm.gold:hover {
+  background: rgba(90, 70, 20, .7);
+  border-color: rgba(255, 210, 120, .7);
+}
+
+.invnew {
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px dashed rgba(255, 210, 120, .45);
+  background: rgba(60, 48, 14, .35);
+  font-size: 12px;
+  color: #ffe6b0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.invnew .bad { color: #ff9a9a; }
+
+.icode {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  letter-spacing: .06em;
+  color: #ffe6b0;
+}
+
+.irow {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(14, 17, 34, .6);
+}
+.irow.used { opacity: .5; }
+.irow .im { flex: 1; min-width: 110px; font-size: 11px; color: var(--dim); }
+.irow .mini { padding: 4px 10px; font-size: 11px; }
+.irow .mini.del { color: #ff9a9a; border-color: rgba(255, 110, 110, .32); }
+.irow .mini.del:hover { background: rgba(90, 25, 35, .7); border-color: rgba(255, 110, 110, .65); }
+
+/* 账号行：名字要显眼，不能像 uid 那样一小撮灰字 */
+.prow .pname {
+  flex: 1;
+  min-width: 100px;
+  font-size: 13px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.prow .pname .tag {
+  font-style: normal;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .08);
+  color: var(--dim);
+}
+
+/* 折叠区块 */
+.fold summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--dim);
+  padding: 4px 0;
+  list-style: none;
+  user-select: none;
+}
+.fold summary::-webkit-details-marker { display: none; }
+.fold summary::before { content: '▸ '; }
+.fold[open] summary::before { content: '▾ '; }
+.fold summary:hover { color: var(--fg); }
+.fold .code-block { margin-top: 8px; }
+
+@media (max-width: 620px) {
+  .prow .pname { flex: 1 0 100%; }
+  .irow .im { flex: 1 0 100%; }
+}

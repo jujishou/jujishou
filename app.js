@@ -1016,7 +1016,8 @@ function fmtTime(sec) {
 }
 
 /* 后台界面状态（跨自动刷新保留） */
-var adminState = { q: '', sort: 'pulls', logFilter: 'all', players: [], logs: [] };
+var adminState = { q: '', sort: 'pulls', logFilter: 'all', players: [], logs: [],
+                   users: [], invites: [] };
 
 function renderAdmin() {
   if (!isUnlocked()) { renderGate(); return; }
@@ -1044,9 +1045,21 @@ function renderAdmin() {
       '重启的真正意义是让「已经打开页面的人」自动换到新版本。）</p>' +
     '</div>' +
     '<div class="sect">' +
-      '<h3>玩家存档<span id="aPCount" class="dot"></span></h3>' +
+      '<h3>测试密钥<span id="aICount" class="dot"></span></h3>' +
+      '<div class="arow">' +
+        '<button class="btn-sm gold" id="aInvNew">生成一次性密钥</button>' +
+        '<button class="btn-sm" id="aInvCopyAll">复制全部未用的</button>' +
+      '</div>' +
+      '<div class="invnew" id="aInvNewBox" hidden></div>' +
+      '<div class="plist" id="adminInvites"></div>' +
+      '<p class="note">站内测期间，来的人要先拿一枚密钥才能注册。一枚只能注册一个账号，' +
+      '用完就作废。已经注册过的人换设备登录不用密钥。' +
+      '把上面生成的那串发给对方就行，注意别发错人。</p>' +
+    '</div>' +
+    '<div class="sect">' +
+      '<h3>账号<span id="aPCount" class="dot"></span></h3>' +
       '<div class="toolbar">' +
-        '<input type="search" id="aSearch" placeholder="搜索玩家 ID…" autocomplete="off">' +
+        '<input type="search" id="aSearch" placeholder="搜索用户名…" autocomplete="off">' +
         '<button class="chip on" id="aSortBtn">按抽数排序</button>' +
       '</div>' +
       '<div class="plist" id="adminPlayers"></div>' +
@@ -1073,8 +1086,10 @@ function renderAdmin() {
       '<p class="msg" id="aMsg"></p>' +
     '</div>' +
     '<div class="sect">' +
-      '<h3>本机原始存档</h3>' +
-      '<code class="code code-block" id="adminRaw"></code>' +
+      '<details class="fold">' +
+        '<summary>本机原始存档</summary>' +
+        '<code class="code code-block" id="adminRaw"></code>' +
+      '</details>' +
     '</div>' +
     '<div class="sect">' +
       '<div class="arow">' +
@@ -1135,6 +1150,46 @@ function renderAdmin() {
     save(); renderAll();
     adminMsg('已清空本机数据', 'good');
   });
+
+  /* --- 测试密钥 --- */
+  var invNew = $('aInvNew');
+  if (invNew) {
+    invNew.addEventListener('click', function () {
+      invNew.disabled = true;
+      api('/api/admin/invite/new', { method: 'POST' }).then(function (r) {
+        invNew.disabled = false;
+        var box = $('aInvNewBox');
+        if (!r.ok || !r.data || !r.data.ok) {
+          if (box) { box.hidden = false; box.innerHTML = '<span class="bad">生成失败</span>'; }
+          return;
+        }
+        var c = r.data.code;
+        if (box) {
+          box.hidden = false;
+          box.innerHTML = '新密钥：<code class="icode">' + adminEsc(c) + '</code>' +
+            '<button class="mini" id="aInvCopyOne">复制</button>';
+          var one = $('aInvCopyOne');
+          if (one) one.addEventListener('click', function () { copyText(c, one); });
+        }
+        api('/api/admin/invites').then(function (r2) {
+          if (r2.data && r2.data.ok) { adminState.invites = r2.data.invites || []; paintInvites(); }
+        }).catch(function () {});
+      }).catch(function () {
+        invNew.disabled = false;
+        adminMsg('生成密钥失败，服务端没响应', 'bad');
+      });
+    });
+  }
+
+  var invCopyAll = $('aInvCopyAll');
+  if (invCopyAll) {
+    invCopyAll.addEventListener('click', function () {
+      var fresh = adminState.invites.filter(function (x) { return !x.used; })
+                                   .map(function (x) { return x.code; });
+      if (!fresh.length) { adminMsg('现在没有未使用的密钥', 'bad'); return; }
+      copyText(fresh.join('\n'), invCopyAll);
+    });
+  }
 
   /* --- 自动刷新开关 / 退出 --- */
   var autoBtn = $('aAuto');
@@ -1251,31 +1306,96 @@ function paintPlayers() {
   var box = $('adminPlayers'), cnt = $('aPCount');
   if (!box) return;
 
-  var list = adminState.players.slice();
+  /* 账号表（有名字、注册时间）跟存档表（有原始存档）按 uid 合并 */
+  var byUid = {};
+  adminState.players.forEach(function (p) { byUid[p.id] = p; });
+
+  var list = adminState.users.map(function (u) {
+    var sv = byUid[u.uid] || {};
+    return {
+      uid: u.uid,
+      name: u.name || u.uid,
+      hasAccount: true,
+      created: u.created || 0,
+      pulls: u.pulls || sv.pulls || 0,
+      ur: sv.ur || 0,
+      bytes: u.bytes || sv.bytes || 0,
+      mtime: u.mtime || 0,
+      raw: sv.raw || ''
+    };
+  });
+
+  /* 还有存档但没账号的（账号系统之前留下的匿名存档），也列出来别弄丢 */
+  adminState.players.forEach(function (p) {
+    var hit = false;
+    for (var i = 0; i < list.length; i++) if (list[i].uid === p.id) { hit = true; break; }
+    if (!hit) list.push({
+      uid: p.id, name: '(匿名存档)', hasAccount: false,
+      created: 0, pulls: p.pulls || 0, ur: p.ur || 0,
+      bytes: p.bytes || 0, mtime: 0, raw: p.raw || ''
+    });
+  });
+
   var q = adminState.q;
-  if (q) list = list.filter(function (p) { return p.id.toLowerCase().indexOf(q) >= 0; });
+  if (q) {
+    list = list.filter(function (p) {
+      return p.name.toLowerCase().indexOf(q) >= 0 || p.uid.toLowerCase().indexOf(q) >= 0;
+    });
+  }
 
   list.sort(function (a, b) {
-    if (adminState.sort === 'id') return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    if (adminState.sort === 'id') return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
     if (adminState.sort === 'bytes') return b.bytes - a.bytes;
     return b.pulls - a.pulls;
   });
 
-  if (cnt) cnt.textContent = list.length + ' / ' + adminState.players.length;
+  if (cnt) cnt.textContent = list.length + ' / ' + adminState.users.length;
 
   if (!list.length) {
     box.innerHTML = '<p class="empty">' +
-      (adminState.players.length ? '没有匹配的玩家。' : '还没有任何玩家存档。') + '</p>';
+      (adminState.users.length || adminState.players.length ? '没有匹配的账号。' : '还没有人注册。') +
+      '</p>';
     return;
   }
 
   box.innerHTML = list.map(function (p) {
-    return '<div class="prow" data-pid="' + adminEsc(p.id) + '">' +
-      '<span class="pid" title="' + adminEsc(p.id) + '">' + adminEsc(p.id) + '</span>' +
-      '<span class="pm">' + p.pulls + ' 抽 · <em>UR ' + p.ur + '</em> · ' + fmtSize(p.bytes) + '</span>' +
-      '<button class="mini" data-act="raw">详情</button>' +
+    return '<div class="prow" data-uid="' + adminEsc(p.uid) + '">' +
+      '<span class="pname" title="' + adminEsc(p.uid) + '">' + adminEsc(p.name) +
+        (p.hasAccount ? '' : ' <em class="tag">无账号</em>') + '</span>' +
+      '<span class="pm">' + p.pulls + ' 抽 · <em>UR ' + p.ur + '</em> · ' + fmtSize(p.bytes) +
+        (p.created ? ' · ' + fmtTime(p.created) + ' 注册' : '') + '</span>' +
+      (p.raw ? '<button class="mini" data-act="raw">详情</button>' : '') +
       '<button class="mini del" data-act="del">删除</button>' +
-      '<pre class="code code-block" hidden>' + adminEsc(p.raw) + '</pre>' +
+      (p.raw ? '<pre class="code code-block" hidden>' + adminEsc(p.raw) + '</pre>' : '') +
+    '</div>';
+  }).join('');
+}
+
+function paintInvites() {
+  var box = $('adminInvites'), cnt = $('aICount');
+  if (!box) return;
+
+  var list = adminState.invites.slice();
+  list.sort(function (a, b) {
+    if (a.used !== b.used) return a.used - b.used;   /* 没用的排前面 */
+    return (b.created || 0) - (a.created || 0);
+  });
+
+  var fresh = list.filter(function (x) { return !x.used; }).length;
+  if (cnt) cnt.textContent = fresh + ' 枚可用 / 共 ' + list.length;
+
+  if (!list.length) {
+    box.innerHTML = '<p class="empty">还没生成过密钥。点上面那个按钮生成一枚。</p>';
+    return;
+  }
+
+  box.innerHTML = list.map(function (v) {
+    return '<div class="irow' + (v.used ? ' used' : '') + '" data-code="' + adminEsc(v.code) + '">' +
+      '<code class="icode">' + adminEsc(v.code) + '</code>' +
+      '<span class="im">' + (v.used ? '已用于 ' + adminEsc(v.uid || '?') : '可用') +
+        (v.created ? ' · ' + fmtTime(v.created) : '') + '</span>' +
+      (v.used ? '' : '<button class="mini" data-act="copy">复制</button>') +
+      '<button class="mini del" data-act="ivdel">删除</button>' +
     '</div>';
   }).join('');
 }
@@ -1365,6 +1485,18 @@ function refreshAdminLive() {
     paintPlayers();
   }).catch(function () {});
 
+  api('/api/admin/users').then(function (r) {
+    if (!r.data || !r.data.ok) return;
+    adminState.users = r.data.users || [];
+    paintPlayers();
+  }).catch(function () {});
+
+  api('/api/admin/invites').then(function (r) {
+    if (!r.data || !r.data.ok) return;
+    adminState.invites = r.data.invites || [];
+    paintInvites();
+  }).catch(function () {});
+
   api('/api/admin/logs').then(function (r) {
     if (!r.data || !r.data.ok) return;
     adminState.logs = (r.data.logs || []).slice().reverse();
@@ -1375,13 +1507,74 @@ function refreshAdminLive() {
   if (raw) raw.textContent = JSON.stringify(state, null, 2);
 }
 
-/* --- 玩家卡片上的按钮（事件委托，避免每次刷新重绑） --- */
+
+/* 复制到剪贴板。http 下 navigator.clipboard 用不了（不是安全上下文），
+   所以留一条 execCommand 的老路。 */
+function copyText(text, btn) {
+  function done() {
+    if (!btn) return;
+    var old = btn.textContent;
+    btn.textContent = '已复制';
+    setTimeout(function () { btn.textContent = old; }, 1400);
+  }
+  function fallback() {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      done();
+    } catch (e) { adminMsg('复制失败，手动选一下吧', 'bad'); }
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  } else fallback();
+}
+
+/* --- 后台列表里的按钮（事件委托，避免每次刷新重绑） --- */
 document.addEventListener('click', function (e) {
-  var btn = e.target.closest && e.target.closest('.prow [data-act]');
+  if (!e.target.closest) return;
+
+  /* 密钥行：复制 / 删除 */
+  var ib = e.target.closest('.irow [data-act]');
+  if (ib) {
+    var irow = ib.closest('.irow');
+    var code = irow && irow.getAttribute('data-code');
+    var iact = ib.getAttribute('data-act');
+    if (!code) return;
+
+    if (iact === 'copy') { copyText(code, ib); return; }
+
+    if (iact === 'ivdel') {
+      if (!confirm('删除密钥 ' + code + ' 吗？')) return;
+      ib.disabled = true;
+      api('/api/admin/invite/delete', { method: 'POST', body: 'code=' + encodeURIComponent(code) })
+        .then(function (r) {
+          if (r.ok && r.data && r.data.ok) {
+            adminState.invites = adminState.invites.filter(function (v) { return v.code !== code; });
+            paintInvites();
+          } else {
+            alert('删除失败：' + ((r.data && r.data.msg) || '未知错误'));
+            ib.disabled = false;
+          }
+        })
+        .catch(function () { alert('无法连接服务器'); ib.disabled = false; });
+      return;
+    }
+  }
+
+  /* 账号行：看详情 / 删号 */
+  var btn = e.target.closest('.prow [data-act]');
   if (!btn) return;
   var row = btn.closest('.prow');
-  var pid = row && row.getAttribute('data-pid');
-  if (!pid) return;
+  var uid = row && row.getAttribute('data-uid');
+  if (!uid) return;
   var act = btn.getAttribute('data-act');
 
   if (act === 'raw') {
@@ -1392,12 +1585,13 @@ document.addEventListener('click', function (e) {
   }
 
   if (act === 'del') {
-    if (!confirm('确定删除玩家 ' + pid + ' 的存档吗？\n这在服务器上是真的删除，无法恢复。')) return;
+    if (!confirm('确定删除账号「' + uid + '」吗？\n账号和它的存档都会在服务器上真的删掉，无法恢复。')) return;
     btn.disabled = true;
-    api('/api/admin/delete', { method: 'POST', body: 'pid=' + encodeURIComponent(pid) })
+    api('/api/admin/user/delete', { method: 'POST', body: 'uid=' + encodeURIComponent(uid) })
       .then(function (r) {
         if (r.ok && r.data && r.data.ok) {
-          adminState.players = adminState.players.filter(function (p) { return p.id !== pid; });
+          adminState.users = adminState.users.filter(function (u) { return u.uid !== uid; });
+          adminState.players = adminState.players.filter(function (p) { return p.id !== uid; });
           paintPlayers();
         } else {
           alert('删除失败：' + ((r.data && r.data.msg) || '未知错误'));
@@ -1451,6 +1645,171 @@ function importSave(e) {
   e.target.value = '';
 }
 
+
+/* ---------- 内测门禁：一次性密钥 + 注册 / 登录 ---------- */
+/* 后端在线时，没账号就不让进；静态托管（GitHub Pages 那种）探测不到
+   /api/me，就直接放行，保持原来的纯本地玩法。 */
+var account = { name: '', online: false, checked: false };
+
+function gateMsg(text, good) {
+  var el = $('gMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'gate-msg' + (good ? ' good' : '');
+}
+
+function showGate() {
+  var g = $('gate');
+  if (!g) return;
+  g.hidden = false;
+  document.body.classList.add('gated');
+}
+
+function hideGate() {
+  var g = $('gate');
+  if (!g) return;
+  g.hidden = true;
+  document.body.classList.remove('gated');
+}
+
+/* footer 上显示当前是谁 */
+function setWho(name) {
+  var el = $('who');
+  if (!el) return;
+  if (!name) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.innerHTML = '';
+  var b = document.createElement('b');
+  b.textContent = name;
+  el.appendChild(document.createTextNode('当前账号 '));
+  el.appendChild(b);
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = '退出';
+  btn.addEventListener('click', function () {
+    fetch('api/player/logout', {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store'
+    }).catch(function () {}).then(function () {
+      account.name = '';
+      setWho('');
+      gateMsg('');
+      showGate();
+    });
+  });
+  el.appendChild(btn);
+}
+
+function gatePost(url, data) {
+  var parts = [];
+  Object.keys(data).forEach(function (k) {
+    parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(data[k]));
+  });
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    credentials: 'same-origin',
+    cache: 'no-store',
+    body: parts.join('&')
+  }).then(function (r) {
+    return r.json().catch(function () { return { ok: false, msg: '服务器返回异常' }; });
+  });
+}
+
+/* 问服务端「我是谁」。静态托管上这个请求会失败，那就当没有后端。 */
+function checkAccount() {
+  return fetch('api/me', { credentials: 'same-origin', cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      if (!d || !d.ok) { account.online = false; account.checked = true; return false; }
+      account.online = true;
+      account.checked = true;
+      if (d.signedIn) {
+        account.name = d.name || '';
+        setWho(account.name);
+        hideGate();
+        return true;
+      }
+      showGate();
+      return false;
+    })
+    .catch(function () {
+      account.online = false;
+      account.checked = true;
+      return false;
+    });
+}
+
+function gateSwitch(which) {
+  var reg = which === 'reg';
+  $('gTabReg').classList.toggle('on', reg);
+  $('gTabLogin').classList.toggle('on', !reg);
+  $('gRegForm').hidden = !reg;
+  $('gLoginForm').hidden = reg;
+  gateMsg('');
+}
+
+function gateDoRegister() {
+  var code = $('gRegCode').value.trim().toUpperCase();
+  var name = $('gRegName').value.trim();
+  var pass = $('gRegPass').value;
+
+  if (!code) { gateMsg('请先填一次性密钥'); return; }
+  if (!name) { gateMsg('请填一个用户名'); return; }
+  if ((pass || '').length < 6) { gateMsg('密码至少 6 位'); return; }
+
+  $('gRegGo').disabled = true;
+  gateMsg('正在注册…');
+  gatePost('api/register', { name: name, pass: pass, code: code })
+    .then(function (d) {
+      $('gRegGo').disabled = false;
+      if (!d || !d.ok) { gateMsg((d && d.msg) || '注册失败'); return; }
+      account.online = true;
+      account.name = d.name || name;
+      setWho(account.name);
+      hideGate();
+      syncFromServer();
+    })
+    .catch(function () {
+      $('gRegGo').disabled = false;
+      gateMsg('网络不通，注册没成功');
+    });
+}
+
+function gateDoLogin() {
+  var name = $('gLogName').value.trim();
+  var pass = $('gLogPass').value;
+
+  if (!name || !pass) { gateMsg('用户名和密码都要填'); return; }
+
+  $('gLogGo').disabled = true;
+  gateMsg('正在登录…');
+  gatePost('api/player/login', { name: name, pass: pass })
+    .then(function (d) {
+      $('gLogGo').disabled = false;
+      if (!d || !d.ok) { gateMsg((d && d.msg) || '登录失败'); return; }
+      account.online = true;
+      account.name = d.name || name;
+      setWho(account.name);
+      hideGate();
+      syncFromServer();
+    })
+    .catch(function () {
+      $('gLogGo').disabled = false;
+      gateMsg('网络不通，登录没成功');
+    });
+}
+
+$('gTabReg').addEventListener('click', function () { gateSwitch('reg'); });
+$('gTabLogin').addEventListener('click', function () { gateSwitch('login'); });
+$('gRegGo').addEventListener('click', gateDoRegister);
+$('gLogGo').addEventListener('click', gateDoLogin);
+$('gRegPass').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') gateDoRegister();
+});
+$('gLogPass').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') gateDoLogin();
+});
+
 /* ---------- 后台入口绑定 ---------- */
 $('adminBtn').addEventListener('click', openAdmin);
 $('adminClose').addEventListener('click', closeAdmin);
@@ -1465,5 +1824,5 @@ document.addEventListener('keydown', function (e) {
 let serverOnline = false;
 renderAll();
 probeServer();
-syncFromServer();
+checkAccount();
 watchRestart();
