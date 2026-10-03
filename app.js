@@ -608,10 +608,25 @@ function sfxOpen() {
    全程点一下可以跳过：视频阶段点了进卡片，卡片阶段点了收尾。 */
 
 var ULTRA_VIDEO_SRC = 'art/ur-intro.mp4';
-var ULTRA_VIDEO_TIMEOUT = 2500;    /* 视频这么久还没开始播就当它不行 */
+var ULTRA_VIDEO_TIMEOUT = 7000;    /* 视频这么久还没开始播就当它不行（要给慢网络留时间） */
 var ULTRA_VIDEO_MAXWAIT = 16000;   /* 视频最长放这么久，防止卡死 */
 var ULTRA_CARD_HOLD = 2600;        /* 卡片冲出来之后停留多久 */
 var ultraRefs = null;
+var ultraPreloaded = false;
+
+/* 用户已经动手抽过了，说明他要玩，这时候在后台把视频取回来放进浏览器缓存。
+   只做一次，不挡任何东西；真抽到 UR 时就不用等下载了。 */
+function preloadUltra() {
+  if (ultraPreloaded) return;
+  ultraPreloaded = true;
+  try {
+    if (typeof fetch === 'function') {
+      fetch(ULTRA_VIDEO_SRC, { cache: 'force-cache' }).then(function (r) {
+        if (r && r.body && typeof r.body.cancel === 'function') { try { r.body.cancel(); } catch (e) {} }
+      }).catch(function () {});
+    }
+  } catch (e) { /* 取不到就算了，到时候现下 */ }
+}
 
 function ultraDom() {
   if (ultraRefs) return true;
@@ -663,6 +678,7 @@ function playUltra(item, done) {
   function onError() { toCard(); }
   function onPlaying() {
     clearTimeout(guardTimer);
+    if (!closed && phase === 'video') r.tip.textContent = '点击任意处跳过 »';
     r.video.removeEventListener('playing', onPlaying);
   }
   function detachVideo() {
@@ -767,7 +783,7 @@ function playUltra(item, done) {
   r.stage.classList.remove('on');
   r.white.classList.remove('go');
   r.sparks.innerHTML = '';
-  r.tip.textContent = '点击任意处跳过 »';
+  r.tip.textContent = '召唤中…';
   void r.root.offsetWidth;
   r.root.classList.add('on');
 
@@ -816,6 +832,7 @@ function pull(n) {
   for (let i = 0; i < n; i++) items.push(drawOne(poolId));
 
   save();
+  setTimeout(preloadUltra, 1500);
 
   let urItem = null;
   for (let i = 0; i < items.length; i++) {
