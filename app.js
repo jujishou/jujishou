@@ -1078,7 +1078,7 @@ function fmtTime(sec) {
 
 /* 后台界面状态（跨自动刷新保留） */
 var adminState = { q: '', sort: 'pulls', logFilter: 'all', players: [], logs: [],
-                   users: [], invites: [] };
+                   users: [], invites: [], open: {} };
 
 function renderAdmin() {
   if (!isUnlocked()) { renderGate(); return; }
@@ -1513,6 +1513,9 @@ function paintPlayers() {
 
   box.innerHTML = list.map(function (p) {
     var seen = seenInfo(p.lastSeen);
+    /* 详情默认不展开。自动刷新每几秒就重建一次整个列表，所以展开状态记在
+       adminState.open 里，重建之后照着恢复，否则刚点开的详情转眼就被刷没了。 */
+    var open = !!(adminState.open && adminState.open[p.uid]);
     return '<div class="prow" data-uid="' + adminEsc(p.uid) + '">' +
       '<span class="pname" title="' + adminEsc(p.uid) + '">' + adminEsc(p.name) +
         (p.hasAccount ? '' : ' <em class="tag">无账号</em>') + '</span>' +
@@ -1522,9 +1525,10 @@ function paintPlayers() {
       '<span class="pm">' + p.pulls + ' 抽 · <em>UR ' + p.ur + '</em> · ' + fmtSize(p.bytes) +
         (p.created ? ' · ' + fmtTime(p.created) + ' 注册' : '') + '</span>' +
       (p.hasAccount ? '<button class="mini" data-act="pass">改密码</button>' : '') +
-      (p.raw ? '<button class="mini" data-act="raw">详情</button>' : '') +
+      (p.raw ? '<button class="mini" data-act="raw">' + (open ? '收起' : '详情') + '</button>' : '') +
       '<button class="mini del" data-act="del">删除</button>' +
-      (p.raw ? '<div class="pdetail" hidden></div>' : '') +
+      (p.raw ? '<div class="pdetail"' + (open ? '' : ' hidden') + '>' +
+        (open ? playerDetailHTML(p) : '') + '</div>' : '') +
     '</div>';
   }).join('');
 }
@@ -1743,15 +1747,22 @@ document.addEventListener('click', function (e) {
   if (act === 'raw') {
     var box = row.querySelector('.pdetail');
     if (!box) return;
-    if (!box.innerHTML) {
-      var item = null;
-      for (var i = 0; i < adminState.players.length; i++) {
-        if (adminState.players[i].uid === uid) { item = adminState.players[i]; break; }
+    if (!adminState.open) adminState.open = {};
+    if (box.hidden) {
+      if (!box.innerHTML) {
+        var item = null;
+        for (var i = 0; i < adminState.players.length; i++) {
+          if (adminState.players[i].uid === uid) { item = adminState.players[i]; break; }
+        }
+        if (!item) return;
+        box.innerHTML = playerDetailHTML(item);
       }
-      if (item) box.innerHTML = playerDetailHTML(item);
-      else return;
+      box.hidden = false;
+      adminState.open[uid] = true;
+    } else {
+      box.hidden = true;
+      adminState.open[uid] = false;
     }
-    box.hidden = !box.hidden;
     btn.textContent = box.hidden ? '详情' : '收起';
     return;
   }
@@ -1783,6 +1794,7 @@ document.addEventListener('click', function (e) {
         if (r.ok && r.data && r.data.ok) {
           adminState.users = adminState.users.filter(function (u) { return u.uid !== uid; });
           adminState.players = adminState.players.filter(function (p) { return p.uid !== uid; });
+          if (adminState.open) delete adminState.open[uid];
           paintPlayers();
         } else {
           alert('删除失败：' + ((r.data && r.data.msg) || '未知错误'));
