@@ -3,32 +3,31 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>星海抽卡 · Starfall Gacha</title>
+<title>星海抽卡</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="sky" id="sky"></div>
 <div class="flash" id="flash"></div>
+<div class="flash ur" id="flashUR"></div>
 
 <header>
   <h1>星海抽卡</h1>
-  <p class="sub">STARFALL&nbsp;GACHA</p>
+  <p class="sub">抽卡模拟器</p>
 </header>
 
 <main>
+  <nav class="tabs" id="tabs"></nav>
+
   <section class="banner">
-    <div class="rates">
-      <span class="rate ssr">SSR 0.6%</span>
-      <span class="rate sr">SR 5.1%</span>
-      <span class="rate r">R 94.3%</span>
-    </div>
+    <div class="rates" id="rates"></div>
     <div class="pity">
       <div class="pity-text">
-        <span>大保底进度</span>
-        <span id="pityLabel">0 / 90</span>
+        <span id="pityName">大隐藏保底</span>
+        <span id="pityLabel">0 / 120</span>
       </div>
       <div class="pity-bar"><i id="pityFill"></i></div>
-      <div class="pity-text small">
+      <div class="pity-text small" id="pity4Row">
         <span>十连保底 SR</span>
         <span id="pity4Label">0 / 10</span>
       </div>
@@ -36,24 +35,28 @@
   </section>
 
   <section class="stage" id="stage">
-    <p class="hint">点击下方按钮，召唤属于你的星灵 ✦</p>
+    <p class="hint">选择卡池，点击下方按钮开始抽卡 ✦</p>
   </section>
 
   <section class="controls">
-    <button class="btn primary" id="pull1">
-      <b>单抽</b><small>×1</small>
-    </button>
-    <button class="btn gold" id="pull10">
-      <b>十连</b><small>×10</small>
-    </button>
+    <button class="btn primary" id="pull1"><b>单抽</b><small>×1</small></button>
+    <button class="btn gold" id="pull10"><b>十连</b><small>×10</small></button>
   </section>
 
   <section class="stats" id="stats"></section>
 
-  <section class="log-wrap">
-    <div class="log-head">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>本池卡面</h2>
+      <span class="tiny" id="galleryNote"></span>
+    </div>
+    <div class="gallery" id="gallery"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
       <h2>抽卡记录</h2>
-      <div class="log-actions">
+      <div class="panel-actions">
         <button class="mini" id="muteBtn" title="音效开关">🔊</button>
         <button class="mini danger" id="resetBtn">重置</button>
       </div>
@@ -62,7 +65,20 @@
   </section>
 </main>
 
-<footer>本地存档 · 刷新不丢 · 仅供娱乐，无任何真实消费</footer>
+<footer>
+  <span>本地存档 · 刷新不丢 · 仅供娱乐，无任何真实消费</span>
+  <button class="mini" id="adminBtn">后台</button>
+</footer>
+
+<div class="modal" id="adminModal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="adminTitle">后台入口</h2>
+      <button class="mini" id="adminClose">关闭</button>
+    </div>
+    <div class="modal-body" id="adminBody"></div>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>
