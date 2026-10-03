@@ -321,7 +321,9 @@ async function handleApi(request, env, url, ctx) {
     }
     const form = parseForm(await request.text());
     const key = String(form.key || '').trim();
-    if (!ctEq(key, String(env.ADMIN_HASH || ''))) {
+    /* 空密钥必须显式挡掉：ctEq('','') 是 true，所以一旦 ADMIN_HASH 被删成
+       undefined，任何人提交一个空 key 都能登进后台。 */
+    if (!key || !env.ADMIN_HASH || !ctEq(key, String(env.ADMIN_HASH))) {
       await failBump(env, ip);
       return json({ ok: false, err: 'bad-key', msg: '密钥不正确' }, 401);
     }

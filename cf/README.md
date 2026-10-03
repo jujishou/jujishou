@@ -94,3 +94,25 @@ npx wrangler deploy
 - **改密码**：密码存的是 PBKDF2 哈希（`pbkdf2$10000$<salt>$<hash>`），**技术上无法反推原文**，
   所以后台能做的只有「换一个新密码」。点了会用 `crypto.getRandomValues` 生成 8 位好念的新密码
   （字符集避开 `l/1/o/0`），返回一次给管理员，旧密码立刻失效。
+
+## 后台密钥已经删掉了 · 想恢复怎么办
+
+后台的管理密钥在 2026-10-03 主动作废（当时密钥已经贴进过聊天记录，干脆换掉）。
+现在的状态是：**谁也进不去后台**，`POST /api/login` 对任何密钥都返回 `bad-key`。
+
+想重新打开后台，重新设一个就行：
+
+```bash
+export CLOUDFLARE_API_TOKEN='...'
+export CLOUDFLARE_ACCOUNT_ID='b33ea042ee8876a582238e82ce149d44'
+printf '%s' '你的新密钥' | sha256sum          # 取摘要
+npx wrangler secret put ADMIN_HASH            # 粘上面那串摘要
+```
+
+前端会把输入框里的内容先去空白、转大写，再算 SHA-256 摘要发过来，所以
+`ADMIN_HASH` 存的必须是**摘要**，不是明文。
+
+> ⚠️ 顺带修了一个真实的漏洞：原来那行是
+> `if (!ctEq(key, String(env.ADMIN_HASH || '')))`，而 `ctEq('', '')` 返回 `true`。
+> 也就是说，只要 `ADMIN_HASH` 被删成 `undefined`，**任何人提交一个空 key 都能登进后台**。
+> 现在改成 `if (!key || !env.ADMIN_HASH || !ctEq(key, ...))`，空密钥显式挡掉。

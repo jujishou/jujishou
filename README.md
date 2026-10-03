@@ -4,8 +4,8 @@
 
 线上地址：**<https://jujishou.dpdns.org>**（账号系统、存档、后台都在这台上，HTTP 自动跳 HTTPS）
 
-另有两条备用地址（纯静态、没有后端，账号功能自动跳过）：
-<https://jujishou.github.io/jujishou/>、`http://120.220.76.234:8880/`
+另一条备用地址 <https://jujishou.github.io/jujishou/>（纯静态、没有后端，账号功能自动跳过）。
+原来那台云服务器上的 C 版已经整套下线删除了，那台机器上不再留任何站点文件。
 
 ## 两个卡池
 
@@ -112,7 +112,7 @@ UR 卡在第一次获得之前，卡面显示成灰度 + `???`。首次抽到之
 | --- | --- | --- |
 | 后台入口 | 探测不到 `/api/health`，按钮自动隐藏 | 显示，需服务端密钥 |
 | 门禁 | 探测不到 `/api/me`，直接放行 | 必须有账号，凭一次性密钥注册 |
-| 密钥校验 | —— | 服务端 PBKDF2(120000 轮)，前端改不动 |
+| 密钥校验 | —— | 服务端 PBKDF2(120000 轮)，前端改不动（C 版，已下线） |
 | 存档 | 只在本机 `localStorage` | 服务端 `saves/<uid>.json`，跟着账号走，换设备自动认领 |
 | 审计 | 无 | 有，落 `access.log` |
 
@@ -120,15 +120,17 @@ UR 卡在第一次获得之前，卡面显示成灰度 + `???`。首次抽到之
 
 仓库里现在有两套后端，前端完全共用：
 
-| | Cloudflare Workers（**现在用的**） | C 版（云服务器） |
+| | Cloudflare Workers（**现在用的**） | C 版（已下线） |
 | --- | --- | --- |
-| 地址 | <https://jujishou.dpdns.org> | `http://120.220.76.234:8880/` |
-| 源码 | `cf/`（`wrangler.toml` + `schema.sql` + `src/worker.js`） | `server/`（`server.c` 等） |
+| 地址 | <https://jujishou.dpdns.org> | 没有了，服务器上的 `/opt/gacha` 已删除 |
+| 源码 | `cf/`（`wrangler.toml` + `schema.sql` + `src/worker.js`） | `server/`（`server.c` 等，只作历史留存） |
 | 存储 | D1 数据库 | 服务器上的 JSON 文件 |
 | HTTPS | 有（Cloudflare 证书） | 没有 |
 | 为什么换 | 机房只放行「过白」域名，`dpdns.org` 这种免费域名备不了案，域名在那边用不了 | —— |
 
-细节见 [`cf/README.md`](cf/README.md)。C 版仍然留着、也还能跑，当备份用。
+细节见 [`cf/README.md`](cf/README.md)。C 版整套（服务、二进制、静态文件、存档、开机自启）
+已经在 2026-10-03 从服务器上删干净，服务器现在只剩 SSH。源码还留在 `server/` 目录里，
+只是当历史记录，不打算再跑了。
 
 ## 服务端
 
