@@ -741,6 +741,38 @@ static int plausible_ip(const char *s)
     return 1;
 }
 
+/* Cloudflare 的回源 IP 段，来自 https://www.cloudflare.com/ips-v4
+   段列表变了要跟着更新 —— 不过它几年才动一次。 */
+static const char *g_cf_nets[] = {
+    "173.245.48.0/20",  "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18",  "108.162.192.0/18","190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15",  "104.16.0.0/13",
+    "104.24.0.0/14",    "172.64.0.0/13",   "131.0.72.0/22",   NULL
+};
+
+/* "a.b.c.d" 在不在 "x.y.z.w/n" 里面。只认 IPv4。 */
+static int ipv4_in_cidr(const char *ip, const char *cidr)
+{
+    unsigned a, b, c, d, o1, o2, o3, o4, bits, mask;
+    if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 0;
+    if (sscanf(cidr, "%u.%u.%u.%u/%u", &o1, &o2, &o3, &o4, &bits) != 5) return 0;
+    if (a > 255 || b > 255 || c > 255 || d > 255) return 0;
+    if (o1 > 255 || o2 > 255 || o3 > 255 || o4 > 255) return 0;
+    if (bits > 32) return 0;
+    /* bits == 0 时不能写 0xFFFFFFFFu << 32，那是未定义行为 */
+    mask = bits ? (0xFFFFFFFFu << (32 - bits)) : 0u;
+    return (((a << 24) | (b << 16) | (c << 8) | d) & mask)
+        == (((o1 << 24) | (o2 << 16) | (o3 << 8) | o4) & mask);
+}
+
+static int is_cloudflare_ip(const char *ip)
+{
+    size_t i;
+    for (i = 0; g_cf_nets[i]; i++)
+        if (ipv4_in_cidr(ip, g_cf_nets[i])) return 1;
+    return 0;
+}
+
 static void access_log(const char *ip, const char *method,
                        const char *path, int code)
 {
@@ -1919,8 +1951,12 @@ int main(int argc, char **argv)
             alarm(CONN_TIMEOUT);
             rc = read_request(cfd, &r);
             /* 前面有反代（Cloudflare）时用它报的真实 IP，日志和限速才不会把所有人
-               当成同一台机器。直连时 g_trust_proxy 是关的，谁也没法伪造。 */
-            if (rc == 0 && g_trust_proxy && plausible_ip(r.fwd_ip))
+               当成同一台机器。但只在两个条件同时成立时才采信：
+                 ① GACHA_TRUST_PROXY 开着；
+                 ② 这条连接确实来自 Cloudflare 的回源段。
+               所以直连 38080 的人伪造 CF-Connecting-IP 也没用 —— 对端 IP 不是 CF，
+               头会被直接丢掉。 */
+            if (rc == 0 && g_trust_proxy && is_cloudflare_ip(ip) && plausible_ip(r.fwd_ip))
                 snprintf(ip, sizeof ip, "%s", r.fwd_ip);
             if (rc == 0) handle(cfd, &r, ip);
             else if (rc == -2) send_text(cfd, 413, "413 Payload Too Large");

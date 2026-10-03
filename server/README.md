@@ -54,6 +54,15 @@ GACHA_PORT=8080 GACHA_WWW=/opt/gacha/www GACHA_DATA=/opt/gacha/data ./gachad
 | `access.log` | 审计日志：`<时间> <IP> <方法> <路径> <状态码>` |
 | `fails.log` | 登录失败记录，用于限速 |
 
+## 环境变量
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `GACHA_PORT` | `8080` | 监听端口 |
+| `GACHA_WWW` | `/opt/gacha/www` | 静态文件目录 |
+| `GACHA_DATA` | `/opt/gacha/data` | 数据目录（存档、账号、密钥、日志） |
+| `GACHA_TRUST_PROXY` | 关 | 打开后从 Cloudflare 回源头取真实客户端 IP，见「安全措施」 |
+
 ## 两种 Cookie
 
 | Cookie | 给谁 | 有效期 | 属性 |
@@ -165,6 +174,11 @@ printf '%s' '你的明文密钥' | sha256sum | awk '{print $1}'
 - **账号密码**：同一套 PBKDF2 参数（120000 轮 + 32 字节随机盐），明文不落盘；
   用户名做大小写归一后再摘要成 `uid`，避免「Admin 和 admin 是两个人」这种坑。
 - **限速**：同一 IP 在 600 秒内失败 5 次即 429，`fails.log` 超过 512 KB 自动只保留最近 1 小时。
+- **反向代理**：`GACHA_TRUST_PROXY=1` 时，如果这条连接来自 Cloudflare 的回源段
+  （内置 [官方 IPv4 列表](https://www.cloudflare.com/ips-v4) 15 个网段），就采信 `CF-Connecting-IP`
+  （回落到 `X-Forwarded-For` 最左边那段）作为真实客户端 IP，用于审计日志和限速。
+  取来的值还要过 `plausible_ip()` 才用。**对端不在 CF 段里时头会被直接丢掉** ——
+  所以直连 38080 伪造 `CF-Connecting-IP` 没有用，日志里记的仍然是对端真实 IP。
 - **路径穿越**：URL 先解码再检查，`..` 一律 404；已在真实服务上验证过 4 种编码变体。
 - **注入**：写入前用 `json_quick_check()` 校验括号平衡、字符串闭合、转义与深度；
   读取时用 `json_escape()` 转义成 JSON 字符串再交给前端 `JSON.parse()`，不存在拼接。
