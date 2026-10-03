@@ -7,6 +7,11 @@ compatibility_date = "2026-09-01"
 [assets]
 directory = "./public"
 binding = "ASSETS"
+# 关键：默认情况下，请求只要命中静态文件就由 Assets 直接返回，Worker 根本不执行，
+# 于是 Worker 里给 HTML 设的 no-store 就形同虚设，Cloudflare 边缘会把 index.html
+# 缓存住，新版 v= 摘要传不出去，用户永远加载旧的 CSS/JS。
+# 打开这个开关让所有请求先过 Worker，缓存策略才真正由我们说了算。
+run_worker_first = true
 
 # 自定义域名：Cloudflare 会自动建好 DNS 记录和证书。
 # （workers.dev 在国内被 DNS 污染，必须走自己的域名）

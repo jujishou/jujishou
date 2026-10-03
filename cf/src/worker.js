@@ -557,7 +557,23 @@ export default {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith('/api/')) {
-      return env.ASSETS.fetch(request);
+      const res = await env.ASSETS.fetch(request);
+      if (res.status === 304 || res.status === 204) return res;
+      const h = new Headers(res.headers);
+      const ct = h.get('content-type') || '';
+      if (ct.indexOf('text/html') >= 0) {
+        // HTML 绝对不能缓存：它里面带着 style.css?v=<内容摘要> / app.js?v=<内容摘要>，
+        // 一旦被 Cloudflare 边缘缓存住，新的版本号就永远传不出去，
+        // 用户会一直加载旧 CSS/JS —— 本站已经被这个坑过一次。
+        h.set('Cache-Control', 'no-store, must-revalidate');
+        h.set('CDN-Cache-Control', 'no-store');
+      } else if (url.searchParams.has('v')) {
+        // 带内容摘要的 CSS/JS：内容一变 URL 就变，可以放心长缓存
+        h.set('Cache-Control', 'public, max-age=31536000, immutable');
+      } else {
+        h.set('Cache-Control', 'public, max-age=300');
+      }
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
     }
 
     let status = 500;

@@ -357,7 +357,9 @@ const adminTitleEl = $('adminTitle');
 /* 背景星点 */
 (function makeSky() {
   const frag = document.createDocumentFragment();
-  for (let i = 0; i < 70; i++) {
+  /* 44 颗而不是 70 颗：每颗都是一个独立的合成层，手机上数量比密度更影响帧率，
+     少掉的这部分肉眼几乎看不出来。 */
+  for (let i = 0; i < 44; i++) {
     const s = document.createElement('i');
     const size = (1 + Math.random() * 2).toFixed(1);
     s.style.left = Math.random() * 100 + '%';
@@ -385,7 +387,7 @@ function cardEl(item) {
     '<div class="card-inner">' +
       '<div class="card-face card-back">✦<span>星海</span></div>' +
       '<div class="card-face card-front">' +
-        '<img class="art" src="' + card.art + '" alt="' + displayName(card, item.rarity) + '" style="' + artStyle(card) + '">' +
+        '<img class="art" decoding="async" src="' + card.art + '" alt="' + displayName(card, item.rarity) + '" style="' + artStyle(card) + '">' +
         '<span class="tag">' + r.label + '</span>' +
         '<div class="scrim">' +
           '<div class="cname">' + displayName(card, item.rarity) + '</div>' +
@@ -602,6 +604,58 @@ function sfxOpen() {
   } catch (e) { /* 静默 */ }
 }
 
+/* 大隐藏卡片冲出来的那一刻：低频冲击 + 噪声「唰」+ 金属闪光。
+   视频原声是留着的，所以这段只在「卡片阶段」响，跟视频声音不打架。 */
+function sfxUltraCard() {
+  if (state.muted) return;
+  const ac = ensureAudio();
+  if (!ac) return;
+  try {
+    const t0 = ac.currentTime;
+
+    /* ① 低频冲击：180Hz 一屁股坐到底，就是那声「轰」 */
+    const o1 = ac.createOscillator(), g1 = ac.createGain();
+    o1.type = 'sine';
+    o1.frequency.setValueAtTime(180, t0);
+    o1.frequency.exponentialRampToValueAtTime(38, t0 + 0.5);
+    g1.gain.setValueAtTime(0.0001, t0);
+    g1.gain.exponentialRampToValueAtTime(0.17, t0 + 0.012);
+    g1.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.62);
+    o1.connect(g1).connect(ac.destination);
+    o1.start(t0); o1.stop(t0 + 0.66);
+
+    /* ② 噪声「唰」：白噪声过带通，从低沉一下扫到明亮 */
+    const len = Math.floor(ac.sampleRate * 0.32);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = ac.createBufferSource(); src.buffer = buf;
+    const bp = ac.createBiquadFilter(); bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(700, t0);
+    bp.frequency.exponentialRampToValueAtTime(5200, t0 + 0.26);
+    bp.Q.value = 1.1;
+    const g2 = ac.createGain();
+    g2.gain.setValueAtTime(0.0001, t0);
+    g2.gain.exponentialRampToValueAtTime(0.09, t0 + 0.015);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3);
+    src.connect(bp).connect(g2).connect(ac.destination);
+    src.start(t0); src.stop(t0 + 0.34);
+
+    /* ③ 金属闪光：G6 / C7 / E7 三个音错开 45ms 依次亮起来 */
+    [1568, 2093, 2637].forEach(function (f, i) {
+      const t = t0 + 0.06 + i * 0.045;
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = 'triangle';
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.052, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.85);
+      o.connect(g).connect(ac.destination);
+      o.start(t); o.stop(t + 0.9);
+    });
+  } catch (e) { /* 没有音频环境就静默 */ }
+}
+
 /* ---------- 大隐藏（UR）出场演出 ---------- */
 /* 抽到 UR 时：先全屏放一段视频，视频结束再把卡片从爆光里冲出来。
    视频按需加载（第一次抽到才去取），加载失败或不允许自动播放就直接进动画。
@@ -731,6 +785,9 @@ function playUltra(item, done) {
       void r.white.offsetWidth;
       r.white.classList.add('go');
 
+      /* 白闪和震屏一起发生，声音也卡在这一帧 */
+      sfxUltraCard();
+
       r.root.classList.remove('ultra-quake');
       void r.root.offsetWidth;
       r.root.classList.add('ultra-quake');
@@ -827,6 +884,9 @@ function pull(n) {
   document.querySelectorAll('.btn').forEach(function (b) { b.disabled = true; });
   sfxTap();
 
+  /* 演出期间把星空关掉（它全屏被特效盖着，画了也白画） */
+  document.body.classList.add('pulling');
+
   const poolId = state.current;
   const items = [];
   for (let i = 0; i < n; i++) items.push(drawOne(poolId));
@@ -849,6 +909,7 @@ function pull(n) {
     setTimeout(refreshAdminLive, 60);
     setTimeout(function () {
       busy = false;
+      document.body.classList.remove('pulling');
       document.querySelectorAll('.btn').forEach(function (b) { b.disabled = false; });
     }, 120 + items.length * 110 + 700);
   }
@@ -1308,7 +1369,7 @@ function paintPlayers() {
 
   /* 账号表（有名字、注册时间）跟存档表（有原始存档）按 uid 合并 */
   var byUid = {};
-  adminState.players.forEach(function (p) { byUid[p.id] = p; });
+  adminState.players.forEach(function (p) { byUid[p.uid] = p; });
 
   var list = adminState.users.map(function (u) {
     var sv = byUid[u.uid] || {};
@@ -1328,9 +1389,9 @@ function paintPlayers() {
   /* 还有存档但没账号的（账号系统之前留下的匿名存档），也列出来别弄丢 */
   adminState.players.forEach(function (p) {
     var hit = false;
-    for (var i = 0; i < list.length; i++) if (list[i].uid === p.id) { hit = true; break; }
+    for (var i = 0; i < list.length; i++) if (list[i].uid === p.uid) { hit = true; break; }
     if (!hit) list.push({
-      uid: p.id, name: '(匿名存档)', hasAccount: false,
+      uid: p.uid, name: p.name || '(匿名存档)', hasAccount: false,
       created: 0, pulls: p.pulls || 0, ur: p.ur || 0,
       bytes: p.bytes || 0, mtime: 0, raw: p.raw || ''
     });
@@ -1480,7 +1541,12 @@ function refreshAdminLive() {
           ur += (sv.pools[k].got && sv.pools[k].got.UR) || 0;
         });
       } catch (e) { /* 存档坏了也不影响列表 */ }
-      return { id: p.id, bytes: p.bytes, raw: p.raw, pulls: pulls, ur: ur };
+      /* 两个后端的字段名不一样：C 版 /api/admin/saves 给的是 id，
+         Cloudflare Workers 版给的是 uid。这里统一成 uid（id 也留着兼容老代码），
+         否则下面按 uid 合并时全都对不上，存档会被当成「匿名存档」重复列出来，
+         而且删除时拿到的是 undefined，永远删不掉。 */
+      var pid = p.uid || p.id || '';
+      return { id: pid, uid: pid, name: p.name || '', bytes: p.bytes, raw: p.raw, pulls: pulls, ur: ur };
     });
     paintPlayers();
   }).catch(function () {});
@@ -1591,7 +1657,7 @@ document.addEventListener('click', function (e) {
       .then(function (r) {
         if (r.ok && r.data && r.data.ok) {
           adminState.users = adminState.users.filter(function (u) { return u.uid !== uid; });
-          adminState.players = adminState.players.filter(function (p) { return p.id !== uid; });
+          adminState.players = adminState.players.filter(function (p) { return p.uid !== uid; });
           paintPlayers();
         } else {
           alert('删除失败：' + ((r.data && r.data.msg) || '未知错误'));
@@ -1870,8 +1936,8 @@ document.addEventListener('focusout', function (e) {
     document.body.classList.toggle('kb', kb > 0 || shrunk > 120);
   }
 
-  vv.addEventListener('resize', sync);
-  vv.addEventListener('scroll', sync);
+  vv.addEventListener('resize', sync, { passive: true });
+  vv.addEventListener('scroll', sync, { passive: true });
   window.addEventListener('orientationchange', function () { baseH = 0; lastKb = -1; setTimeout(sync, 120); });
   sync();
 })();
