@@ -61,13 +61,13 @@ const POOLS = [
     id: 'p2',
     tab: '卡池二',
     name: '方块 · 限定',
-    desc: '方块世界里走出来的三位',
-    rates: { UR: 3, SR: 51, R: 946 },   // 千分比：0.3% / 5.1% / 94.6%
+    desc: '方块世界里走出来的三位，两个是大隐藏',
+    rates: { UR: 3, R: 997 },   // 千分比：0.3% / 99.7%（无 SR 卡，十连保底自动关闭）
     pityUR: PITY_UR,
-    note: '大隐藏：方块白',
+    note: '大隐藏：方块白 / 西装客',
     entries: [
       { id: 'block', rarity: 'UR' },
-      { id: 'suit',  rarity: 'SR' },
+      { id: 'suit',  rarity: 'UR' },
       { id: 'cat',   rarity: 'R'  },
     ],
   },
