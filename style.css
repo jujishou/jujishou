@@ -13,7 +13,21 @@
 
 * { box-sizing: border-box; }
 
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 html, body { margin: 0; min-height: 100%; }
+
+/* ---------- 触屏基础：去掉高亮块、防误选、点按不等 300ms ---------- */
+.card, .btn, .tab, .mini, .btn-sm, .gitem, .log li {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
 
 body {
   font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
@@ -334,7 +348,7 @@ h1 {
 .gitem.locked .gname { color: var(--dim); letter-spacing: .2em; }
 
 /* ---------- 记录 ---------- */
-.log { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
+.log { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .log li {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 16px; font-size: 12px;
@@ -380,7 +394,7 @@ footer {
   padding: 14px 18px; border-bottom: 1px solid var(--line);
 }
 .modal-head h2 { margin: 0; font-size: 15px; letter-spacing: .12em; }
-.modal-body { padding: 18px; overflow-y: auto; }
+.modal-body { padding: 18px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 
 .field { display: flex; gap: 10px; flex-wrap: wrap; }
 .field input {
@@ -456,13 +470,97 @@ code.code { background: rgba(4, 6, 18, .9); padding: 10px 12px; }
 }
 .note { font-size: 11px; line-height: 1.7; color: var(--dim); margin-top: 8px; }
 
+/* ==================== 手机端适配 ==================== */
+
+/* 触屏上不要粘住的 hover 效果 */
+@media (hover: none) {
+  .tab:hover { transform: none; }
+  .card:hover .card-inner { transform: rotateY(0deg); }
+  .card.flipped:hover .card-inner { transform: rotateY(180deg); }
+  .btn:hover { transform: none; box-shadow: none; }
+  .mini:hover { color: var(--dim); border-color: var(--line); }
+  .btn-sm:hover { background: rgba(28, 34, 70, .8); border-color: var(--line); }
+  .tab:active { transform: scale(.97); }
+  .mini:active, .btn-sm:active { opacity: .7; }
+}
+
 @media (max-width: 620px) {
+  body {
+    padding: 20px 12px calc(34px + env(safe-area-inset-bottom, 0px));
+  }
+  header { margin-bottom: 14px; }
+  h1 { font-size: clamp(24px, 8vw, 32px); letter-spacing: .1em; }
+  .sub { font-size: 10px; letter-spacing: .3em; }
+
+  /* 卡池切换：两个按钮平分整行 */
+  .tabs { gap: 8px; margin-bottom: 14px; }
+  .tab { flex: 1; min-width: 0; padding: 9px 8px; }
+  .tab b { font-size: 13px; }
+  .tab small { font-size: 9px; }
+
+  .banner { flex-direction: column; align-items: stretch; gap: 12px; padding: 12px 14px; }
+  .pity { min-width: 0; max-width: none; }
+  .rate { font-size: 11px; padding: 3px 9px; }
+  .rate-note { font-size: 10px; }
+
+  .stage { min-height: 200px; margin: 16px 0; padding: 12px 10px; border-radius: 14px; }
   .results { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+  .results.single .card { max-width: min(62vw, 210px); }
   .card { max-width: none; }
   .cname { font-size: 11px; }
   .stars { font-size: 8px; }
-  .banner { flex-direction: column; align-items: stretch; }
-  .btn { padding: 12px 20px; }
-  .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .modal-body { padding: 14px; }
+  .tag { font-size: 8px; padding: 1px 5px; top: 4px; left: 4px; }
+  .card-front .scrim { padding: 12px 5px 6px; }
+
+  /* 抽卡按钮：撑满一行，指头好按 */
+  .controls { gap: 10px; }
+  .btn { flex: 1; justify-content: center; padding: 15px 12px; }
+  .btn b { font-size: 16px; }
+
+  .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 16px 0; }
+  .stat { padding: 10px 6px; }
+  .stat b { font-size: 16px; }
+  .stat span { font-size: 10px; }
+
+  .panel { border-radius: 12px; margin-bottom: 14px; }
+  .panel-head { padding: 10px 12px; }
+  .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 12px; }
+
+  .log li { padding: 8px 12px; gap: 8px; }
+  .log .li-pool { display: none; }          /* 手机上省地方 */
+  .log .pill { min-width: 34px; }
+
+  footer { margin-top: 18px; }
+
+  /* 后台：手机上从底部弹出 */
+  .modal { padding: 0; align-items: flex-end; }
+  .modal-box {
+    max-width: none;
+    max-height: 92vh;
+    max-height: 92dvh;
+    border-radius: 16px 16px 0 0;
+    border-bottom: 0;
+  }
+  .modal-head { padding: 12px 14px; }
+  .modal-body {
+    padding: 14px;
+    padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px));
+  }
+  .kv { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .field { flex-direction: column; }
+  .field input { min-width: 0; width: 100%; font-size: 16px; }  /* 16px 防 iOS 自动放大 */
+  .field .btn-sm { width: 100%; padding: 12px; font-size: 14px; }
+  .arow .mini, .arow .btn-sm { flex: 1 1 auto; text-align: center; }
+  .keybox { font-size: 15px; letter-spacing: .1em; padding: 12px 8px; }
+}
+
+/* 超窄屏（iPhone SE 之类） */
+@media (max-width: 400px) {
+  h1 { font-size: 24px; letter-spacing: .06em; }
+  .results { gap: 7px; }
+  .results.single .card { max-width: 66vw; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .btn b { font-size: 15px; }
+  .btn small { font-size: 10px; }
+  .log .li-no { font-size: 10px; }
 }
