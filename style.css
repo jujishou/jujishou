@@ -871,19 +871,35 @@ code.code { background: rgba(4, 6, 18, .9); padding: 10px 12px; }
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: radial-gradient(circle at 50% 30%, #1b2340 0%, #0a0d18 62%, #05070d 100%);
+  /* 纯色兜底；渐变在 ::before 那一层，理由见下 */
+  background: #05070d;
   overflow-y: auto;
   overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  /* 独立合成层：弹出输入法引发的重排不牵连底下的页面 */
-  transform: translateZ(0);
+  /* 注意：这里绝对不能加 transform / -webkit-overflow-scrolling。
+     fixed 元素上有 transform 会自建 containing block，键盘弹出时跟系统的
+     视口调整打架；-webkit-overflow-scrolling 会另建滚动层，一弹键盘就抖。 */
+}
+
+/* 全屏 radial-gradient 是重绘大户：门禁里那行提示文字一变（"正在注册…"之类）
+   整个 .gate 就要重绘，渐变得重算一遍。所以把它挪到独立的伪元素上并提层，
+   内容再怎么变这块都不重画。 */
+.gate::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 30%, #1b2340 0%, #0a0d18 62%, #05070d 100%);
+  will-change: transform;
+  z-index: 0;
 }
 .gate[hidden] { display: none; }
 
 .gate-box {
+  position: relative;
+  z-index: 1;
   width: 100%;
   max-width: 380px;
-  margin: auto;
+  margin: 0 auto;
   padding: 26px 22px 22px;
   border-radius: 18px;
   /* 这里原来有 backdrop-filter: blur(10px)。手机弹出输入法时视口变化，
@@ -891,9 +907,8 @@ code.code { background: rgba(4, 6, 18, .9); padding: 10px 12px; }
      直接卡死。去掉模糊、把底色做实，观感几乎一样但便宜太多。 */
   background: rgba(18, 23, 40, 0.97);
   border: 1px solid rgba(130, 160, 255, 0.22);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   box-sizing: border-box;
-  transform: translateZ(0);
 }
 
 .gate-title {
@@ -1013,6 +1028,30 @@ body.typing .modal {
 /* 输入框本身也提成独立层，避免光标闪烁引起整块重绘 */
 .gate-form input,
 .modal input { transform: translateZ(0); }
+
+/* ---------- 键盘真的弹起来时（body.kb）----------
+   var(--kb) 由 JS 用 visualViewport 量出来的键盘高度。
+   门禁改成顶对齐 + 底部留出键盘高度，输入框永远露在键盘上方，
+   也就不会出现「焦点框被键盘压住 → 浏览器自己平移页面 → 画面抖」那套连锁反应。 */
+body.kb { overscroll-behavior: none; }
+
+body.kb .gate {
+  align-items: flex-start;
+  padding-bottom: calc(20px + var(--kb, 0px));
+}
+
+/* 这些都跟键盘无关，弹键盘时直接不画，省一点是一点 */
+body.kb .sky,
+body.kb .flash,
+body.kb .flashUR,
+body.kb .ultra { display: none !important; }
+
+/* 输入框被键盘盖住时，浏览器会把它滚进可视区；给它留点余量别贴着边 */
+.gate-form input { scroll-margin-bottom: 80px; }
+
+/* 门禁是全屏不透明的，底下的东西（星空、卡池、卡片、图鉴、视频层）一律不用画。
+   visibility:hidden 保留布局但跳过绘制 —— 弹键盘时这是省得最多的一刀。 */
+body.gated > *:not(#gate) { visibility: hidden; }
 
 /* 底栏显示当前账号 */
 .who {

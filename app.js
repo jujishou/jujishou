@@ -1837,6 +1837,45 @@ document.addEventListener('focusout', function (e) {
   }
 });
 
+/* ---------- 手机键盘：用 visualViewport 精确跟随 ----------
+   两种浏览器行为都要照顾：
+   · 安卓 Chrome 认 interactive-widget=resizes-content：键盘弹起时布局视口
+     直接变矮，fixed 层自己就缩了，我们什么都别做；
+   · iOS / 老安卓只缩 visual viewport：布局视口纹丝不动，fixed 层会被键盘压住，
+     这时才需要把键盘高度写进 --kb，让 CSS 在门禁底部留出这段空白。
+   另外做了抖动过滤：键盘弹出/收回那几百毫秒里高度每帧都在变，
+   不加过滤就会每帧改一次 CSS 变量、每帧触发一次重排，越修越卡。 */
+(function keyboardGuard() {
+  var vv = window.visualViewport;
+  if (!vv) return;
+  var baseH = 0, lastKb = -1, lastShrunk = -1;
+
+  function sync() {
+    baseH = Math.max(baseH, window.innerHeight, vv.height);
+    var shrunk = Math.round(baseH - window.innerHeight);   // 布局视口缩了多少
+    var kb = 0;
+    if (document.body.classList.contains('typing')) {
+      if (shrunk > 120) {
+        kb = 0;                       // 布局视口已缩，fixed 层跟着矮了，不用再留边
+      } else {
+        kb = Math.round(baseH - vv.height - vv.offsetTop);
+        if (kb < 120) kb = 0;         // 小几十像素是地址栏，不算键盘
+      }
+    }
+    if (shrunk < 0) shrunk = 0;
+    // 抖动过滤：变化不到 4px 就不碰样式
+    if (kb === lastKb && Math.abs(shrunk - lastShrunk) < 4) return;
+    lastKb = kb; lastShrunk = shrunk;
+    document.documentElement.style.setProperty('--kb', kb + 'px');
+    document.body.classList.toggle('kb', kb > 0 || shrunk > 120);
+  }
+
+  vv.addEventListener('resize', sync);
+  vv.addEventListener('scroll', sync);
+  window.addEventListener('orientationchange', function () { baseH = 0; lastKb = -1; setTimeout(sync, 120); });
+  sync();
+})();
+
 /* ---------- 启动 ---------- */
 let serverOnline = false;
 renderAll();
