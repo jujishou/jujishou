@@ -4,7 +4,9 @@
 
 ## 在线试玩
 
-部署后地址：`https://<你的用户名>.github.io/gacha-site/`
+**https://jujishou.github.io/jujishou/**
+
+由 GitHub Pages 托管，HTTPS 已强制开启。
 
 ## 功能
 
@@ -50,12 +52,16 @@ python3 -m http.server 8000
 
 ## 部署到 GitHub Pages
 
-1. 把仓库推到 GitHub（公开仓库，私有仓库的 Pages 需要 Pro）
-2. 打开仓库 `Settings` → `Pages`
-3. `Source` 选 `Deploy from a branch`，分支选 `main`，目录选 `/ (root)`
-4. 等一两分钟，访问 `https://<用户名>.github.io/<仓库名>/`
+本仓库已经部署在 **https://jujishou.github.io/jujishou/**。
 
-页面里的 `style.css` 和 `app.js` 都是相对路径引用，所以放在 `用户名.github.io/仓库名/` 这种子路径下也能正常工作。
+自己重新部署的话：
+
+1. 把仓库推到 GitHub（公开仓库，私有仓库的 Pages 需要 Pro）
+2. 仓库 `Settings` → `Pages`
+3. `Source` 选 `Deploy from a branch`，分支选 `main`，目录选 `/ (root)`
+4. 等一两分钟即可访问
+
+页面里的 `style.css` 和 `app.js` 都是相对路径引用，所以放在 `用户名.github.io/仓库名/` 这种子路径下也能正常工作（已实测验证）。
 
 ## 说明
 
